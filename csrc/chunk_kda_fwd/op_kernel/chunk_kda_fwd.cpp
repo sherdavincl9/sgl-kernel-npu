@@ -109,7 +109,23 @@ __aicore__ inline void DispatchGenericSafeGate(
 
 using ChunkKdaFwd::ChunkKdaFwdTilingData;
 
-extern "C" __global__ __aicore__ void chunk_kda_fwd(
+// FwdH uses SyncAll<false>() and cross-core flags.  The original framework
+// operator requests batch scheduling with TilingContext::SetScheduleMode(1).
+// Kernel-launch operators must express the same requirement on the entrypoint
+// so all requested cores are available together instead of being scheduled in
+// partial waves.
+//
+// ascendc_library's generated device translation unit defines the guard below,
+// temporarily rewrites __global__ to inline, and includes this source as the
+// implementation body.  Schedule-mode attributes are invalid on that inline
+// copy, so attach the attribute only to the real kernel declaration processed
+// outside the generated inline-body pass.
+#if defined(__CHUNK_KDA_FWD__KERNEL_FUN_H__)
+#define KDA_FWD_SCHEDULE_MODE
+#else
+#define KDA_FWD_SCHEDULE_MODE __schedmode__(1)
+#endif
+extern "C" KDA_FWD_SCHEDULE_MODE __global__ __aicore__ void chunk_kda_fwd(
     GM_ADDR q, GM_ADDR k, GM_ADDR v, GM_ADDR g, GM_ADDR beta,
     GM_ADDR a_log, GM_ADDR dt_bias, GM_ADDR initial_state,
     GM_ADDR cu_seqlens, GM_ADDR chunk_indices, GM_ADDR attn_out,
@@ -184,5 +200,7 @@ extern "C" __global__ __aicore__ void chunk_kda_fwd(
         }
     }
 }
+
+#undef KDA_FWD_SCHEDULE_MODE
 
 #undef KDA_COMPILE_ARCH35_FAST_PATH

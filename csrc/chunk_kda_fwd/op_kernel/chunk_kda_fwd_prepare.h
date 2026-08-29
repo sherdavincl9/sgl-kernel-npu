@@ -1893,6 +1893,7 @@ private:
             WaitFlag<HardEvent::MTE2_V>(mte2ToVEvent_);
 
             Muls(aqkLocal, aqkLocal, scale_, static_cast<uint32_t>(matrixElems));
+            PipeBarrier<PIPE_V>();
             ClampFp32ToOutputType(aqkLocal, static_cast<uint32_t>(matrixElems));
             ClampFp32ToOutputType(akkLocal, static_cast<uint32_t>(matrixElems));
             Cast(aqkTyped, aqkLocal, RoundMode::CAST_RINT, static_cast<uint32_t>(matrixElems));

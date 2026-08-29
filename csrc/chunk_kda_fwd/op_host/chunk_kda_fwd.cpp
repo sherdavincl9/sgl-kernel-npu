@@ -21,6 +21,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <tuple>
 #include <vector>
@@ -60,6 +61,15 @@ constexpr uint64_t KDA_GDN_PIPELINE_DEPTH = 2;
 constexpr int64_t MAX_KDA_K_DIM = 256;
 constexpr int64_t MAX_KDA_HEAD_NUM = 128;
 constexpr int64_t MAX_KDA_VARLEN_SEQUENCES = 1024;
+
+// Diagnostic-only zero initialization. These switches make it possible to
+// distinguish an incomplete kernel write/read-before-write from ordinary
+// numerical differences without rebuilding for every A/B run.
+bool DiagnosticZeroInitEnabled(const char *name)
+{
+    const char *value = std::getenv(name);
+    return value != nullptr && value[0] != '\0' && std::strcmp(value, "0") != 0;
+}
 
 enum class KdaFwdLayout {
     BSND,
@@ -540,8 +550,13 @@ chunk_kda_fwd(const at::Tensor &q, const at::Tensor &k, const at::Tensor &v, con
     at::Tensor finalStateOut;
     void *finalStatePtr = nullptr;
     if (storeFinalState) {
-        finalStateOut = at::empty({info.seqNum, hv, kd, vd},
-                                  at::TensorOptions().dtype(at::kFloat).device(q.device()));
+        const auto finalStateOptions =
+            at::TensorOptions().dtype(at::kFloat).device(q.device());
+        const std::vector<int64_t> finalStateShape = {info.seqNum, hv, kd, vd};
+        finalStateOut =
+            DiagnosticZeroInitEnabled("SGLANG_CHUNK_KDA_DIAG_ZERO_FINAL_STATE")
+                ? at::zeros(finalStateShape, finalStateOptions)
+                : at::empty(finalStateShape, finalStateOptions);
         finalStatePtr = finalStateOut.data_ptr();
     }
 
@@ -607,10 +622,15 @@ chunk_kda_fwd(const at::Tensor &q, const at::Tensor &k, const at::Tensor &v, con
 
     const uint64_t tokenHeads = static_cast<uint64_t>(b) * hv * s;
     const uint64_t totalUserWorkspace = tilingData.outputScratchOffset + 2 * tokenHeads * vd * sizeof(float);
+    const uint64_t sysytemWorkspaceBytes = static_cast<int64_t>(ascendcPlatform->GetLibApiWorkSpaceSize());
     const int64_t totalWorkspaceBytes =
-        SYS_WORKSPACE_SIZE + static_cast<int64_t>(AlignWorkspace(totalUserWorkspace));
+        sysytemWorkspaceBytes + static_cast<int64_t>(AlignWorkspace(totalUserWorkspace));
+    const auto workspaceOptions = at::TensorOptions().dtype(at::kByte).device(q.device());
+    const std::vector<int64_t> workspaceShape = {totalWorkspaceBytes};
     auto workspaceTensor =
-        at::empty({totalWorkspaceBytes}, at::TensorOptions().dtype(at::kByte).device(q.device()));
+        DiagnosticZeroInitEnabled("SGLANG_CHUNK_KDA_DIAG_ZERO_WORKSPACE")
+            ? at::zeros(workspaceShape, workspaceOptions)
+            : at::empty(workspaceShape, workspaceOptions);
 
     EXEC_KERNEL_CMD(chunk_kda_fwd, blockDim, qHead, kHead, vHead, gHead, betaHead, aLogPtr, dtBiasPtr,
                     initStatePtr, cuSeqlensPtr, chunkIndicesPtr, attnOut, finalStatePtr, gkPtr, aqkOut,
