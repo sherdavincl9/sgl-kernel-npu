@@ -320,6 +320,11 @@ public:
                               offsets.vBlockDim);
             AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID7);
             AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID7);
+            // The MTE3 copy above still reads accumUb.  The next token row
+            // starts by clearing the same buffer on PIPE_V, so protect that
+            // reuse explicitly; MTE3_MTE2 does not order MTE3 against PIPE_V.
+            AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID7);
+            AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(EVENT_ID7);
         }
     }
 
