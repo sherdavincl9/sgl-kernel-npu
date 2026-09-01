@@ -200,12 +200,21 @@ __aicore__ inline void RunFrontEnd(
         SyncAll<false>();
     }
     GM_ADDR uSeed = (tiling.fusePostWu || tiling.fusePostWuIntoFwdH) ? addresses.u : addresses.uSeed;
+    GM_ADDR wSeed = addresses.w;
+#if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
+    if (!tiling.fusePostWu && !tiling.fusePostWuIntoFwdH) {
+        // Arch35 PostWU reads the prepared W seed while producing W. Keep the
+        // seed in the already-reserved PostWU workspace so output stores can
+        // never overwrite seed rows that have not been consumed yet.
+        wSeed = userWorkspace + tiling.postWuScratchOffset;
+    }
+#endif
 
     KdaPrepare::RunChunkKdaPrepare<SAFE_GATE, T, GK_T, BETA_T,
                                    TilingData, COMPILE_BT, COMPILE_K, COMPILE_V>(
         q, k, v, addresses.gk, g, aLog, dtBias, beta, initialState,
         cuSeqlens, chunkIndices, aqk, akk, addresses.qg,
-        addresses.qgScaled, addresses.w, uSeed, addresses.kg,
+        addresses.qgScaled, wSeed, uSeed, addresses.kg,
         userWorkspace, tiling, pipe, tiling.storeQG);
     SyncAll<false>();
     pipe.Reset();
@@ -213,7 +222,7 @@ __aicore__ inline void RunFrontEnd(
     if (!tiling.fusePostWu && !tiling.fusePostWuIntoFwdH) {
         KdaPostWu::RunChunkKdaPostWu<T, GK_T, BETA_T>(
             q, k, v, addresses.gk, beta, initialState, cuSeqlens,
-            chunkIndices, addresses.w, akk, uSeed,
+            chunkIndices, wSeed, akk, uSeed,
             addresses.w, addresses.u, addresses.kg, addresses.vNew,
             userWorkspace, tiling, pipe);
         SyncAll<false>();

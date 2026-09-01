@@ -168,7 +168,7 @@ public:
                     AscendC::GlobalTensor<UElementInput> uInput, AscendC::GlobalTensor<float> wsInput,
                     uint32_t chunkSize, uint32_t vBlockDim, uint32_t vHeadDim, Arch::CrossCoreFlag cube1Done,
                     Arch::CrossCoreFlag vec1Done, bool isInitialState, bool isFinalState, bool storeFinalState,
-                    bool waitWsFromMte3, bool isPing)
+                    bool waitWsFromMte3, bool isPing, bool cube1AlreadyWaited)
     {
         static constexpr uint32_t ROW_TILE = 16;
         uint32_t mActual = chunkSize;
@@ -185,7 +185,9 @@ public:
         }
         uint32_t pingpongFlag = isPing ? 0 : pongBaseEvent;
         if (rowBegin >= mActual) {
-            Arch::CrossCoreWaitFlag(cube1Done);
+            if (!cube1AlreadyWaited) {
+                Arch::CrossCoreWaitFlag(cube1Done);
+            }
             // A zero-row AIV lane still owns the EVENT0 hand-off consumed by V2.
             if (waitWsFromMte3) {
                 AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0 + pingpongFlag);
@@ -233,7 +235,9 @@ public:
             } else {
                 AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID3 + pingpongFlag);
             }
-            Arch::CrossCoreWaitFlag(cube1Done);
+            if (!cube1AlreadyWaited) {
+                Arch::CrossCoreWaitFlag(cube1Done);
+            }
 
             if (waitWsFromMte3) {
                 AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0 + pingpongFlag);
@@ -289,7 +293,9 @@ public:
         } else {
             AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID3 + pingpongFlag);
         }
-        Arch::CrossCoreWaitFlag(cube1Done);
+        if (!cube1AlreadyWaited) {
+            Arch::CrossCoreWaitFlag(cube1Done);
+        }
 
         bool waitWsThisTileFromMte3 = waitWsFromMte3;
         for (uint32_t rowStart = rowBegin; rowStart < rowEnd;) {

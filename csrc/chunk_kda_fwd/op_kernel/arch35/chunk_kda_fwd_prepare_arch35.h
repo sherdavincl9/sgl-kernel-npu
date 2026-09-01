@@ -3910,9 +3910,11 @@ private:
 #if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
             if constexpr (!(SAFE_GATE && COMPILE_BT == 64 && COMPILE_K == 128 && COMPILE_V == 128)) {
                 Muls(aqkLocal, aqkLocal, scale_, static_cast<uint32_t>(matrixElems));
+                PipeBarrier<PIPE_V>();
             }
 #else
             Muls(aqkLocal, aqkLocal, scale_, static_cast<uint32_t>(matrixElems));
+            PipeBarrier<PIPE_V>();
 #endif
 #if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
             if constexpr (!(SAFE_GATE && COMPILE_BT == 64 && COMPILE_K == 128 && COMPILE_V == 128)) {

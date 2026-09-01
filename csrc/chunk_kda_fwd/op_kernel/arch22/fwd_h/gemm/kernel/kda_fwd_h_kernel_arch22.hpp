@@ -274,7 +274,8 @@ public:
         return static_cast<float>(value);
     }
 
-    __aicore__ inline void ComputeTailVWorkspace(const KdaFwdHOffsets &offsets)
+    // Borrow the stream's V_MTE2 free token and restore it before returning.
+    __aicore__ inline void ComputeTailVWorkspace(const KdaFwdHOffsets &offsets, uint32_t tailEventId)
     {
         uint32_t subBlockIdx = AscendC::GetSubBlockIdx();
         uint32_t subBlockNum = AscendC::GetSubBlockNum();
@@ -284,6 +285,8 @@ public:
         if (rowBegin >= rowEnd) {
             return;
         }
+        AscendC::ResetMask();
+        AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(tailEventId);
 
         constexpr uint32_t TAIL_INPUT_OFFSET = 166 * 1024;
         constexpr uint32_t TAIL_FLOAT_OFFSET = 167 * 1024;
@@ -297,9 +300,16 @@ public:
             AscendC::PipeBarrier<PIPE_V>();
             for (uint32_t kIdx = 0; kIdx < kHeadDim; ++kIdx) {
                 AscendC::DataCopy(inputUb, gmH[offsets.hSrcOffset + kIdx * vHeadDim], offsets.vBlockDim);
-                AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID7);
-                AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID7);
+                AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(tailEventId);
+                AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(tailEventId);
                 AscendC::Cast(floatUb, inputUb, AscendC::RoundMode::CAST_NONE, offsets.vBlockDim);
+                // inputUb is reused by the next kIdx iteration.  PIPE_V and
+                // PIPE_MTE2 run independently, so a PIPE_V barrier alone does
+                // not stop the next DataCopy from overwriting inputUb while
+                // Cast is still reading it.  Queue a V -> MTE2 dependency
+                // before that next copy, matching ComputeHWorkspaceVector().
+                AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(tailEventId);
+                AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(tailEventId);
                 AscendC::PipeBarrier<PIPE_V>();
                 float weight = LoadScalarAsFloat(gmW, offsets.wOffset + tokenRow * kHeadDim + kIdx);
                 AscendC::Muls(floatUb, floatUb, weight, offsets.vBlockDim);
@@ -307,13 +317,19 @@ public:
                 AscendC::Add(accumUb, accumUb, floatUb, offsets.vBlockDim);
                 AscendC::PipeBarrier<PIPE_V>();
             }
-            AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID7);
-            AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID7);
+            AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(tailEventId);
+            AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(tailEventId);
             AscendC::DataCopy(gmVWorkspace[offsets.vWorkOffset + tokenRow * offsets.vBlockDim], accumUb,
                               offsets.vBlockDim);
-            AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID7);
-            AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID7);
+            AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(tailEventId);
+            AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(tailEventId);
+            // The MTE3 copy above still reads accumUb.  The next token row
+            // starts by clearing the same buffer on PIPE_V, so protect that
+            // reuse explicitly; MTE3_MTE2 does not order MTE3 against PIPE_V.
+            AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(tailEventId);
+            AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(tailEventId);
         }
+        AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(tailEventId);
     }
 
     __aicore__ inline void ComputeHWorkspaceVector(const KdaFwdHOffsets &offsets, uint32_t eventId)
@@ -681,8 +697,16 @@ public:
                                 continue;
                             }
                             const KdaFwdHOffsets &vec1Offsets = vecBlockScheduler.GetCurTaskOffsets(stream);
-                            if (vec1Offsets.blockTokens < 16) {
-                                ComputeTailVWorkspace(vec1Offsets);
+                            bool tailVectorPath = vec1Offsets.blockTokens < 16;
+                            if (tailVectorPath) {
+                                // For a short tail Cube does not calculate W @ H,
+                                // but cube1Done still orders this task after the
+                                // previous chunk's V2 update of gmH.  Wait before
+                                // the software W @ H reads gmH, not afterwards in
+                                // the epilogue.
+                                Arch::CrossCoreWaitFlag(vecBlockScheduler.cube1Done[streamId]);
+                                ComputeTailVWorkspace(vec1Offsets,
+                                                      EVENT_ID3 + (streamId == 0 ? 0 : pongEventOffset));
                             }
                             bool waitWsFromMte3 = storeFinalState && std::is_same<ElementFinalState, float>::value &&
                                                   event0FromMte3[streamId];
@@ -692,7 +716,7 @@ public:
                                                 vec1Offsets.vBlockDim, vHeadDim, vecBlockScheduler.cube1Done[streamId],
                                                 vecBlockScheduler.vec1Done[streamId], vec1Offsets.isInitialState,
                                                 vec1Offsets.isFinalState, storeFinalState, waitWsFromMte3,
-                                                (streamId == 0));
+                                                (streamId == 0), tailVectorPath);
                             AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID1);
                             AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID1);
                             if (storeFinalState && std::is_same<ElementFinalState, float>::value) {
