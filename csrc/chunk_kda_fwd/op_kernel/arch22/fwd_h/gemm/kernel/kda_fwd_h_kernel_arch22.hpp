@@ -300,6 +300,13 @@ public:
                 AscendC::SetFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID7);
                 AscendC::WaitFlag<AscendC::HardEvent::MTE2_V>(EVENT_ID7);
                 AscendC::Cast(floatUb, inputUb, AscendC::RoundMode::CAST_NONE, offsets.vBlockDim);
+                // inputUb is reused by the next kIdx iteration.  PIPE_V and
+                // PIPE_MTE2 run independently, so a PIPE_V barrier alone does
+                // not stop the next DataCopy from overwriting inputUb while
+                // Cast is still reading it.  Queue a V -> MTE2 dependency
+                // before that next copy, matching ComputeHWorkspaceVector().
+                AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID7);
+                AscendC::WaitFlag<AscendC::HardEvent::V_MTE2>(EVENT_ID7);
                 AscendC::PipeBarrier<PIPE_V>();
                 float weight = LoadScalarAsFloat(gmW, offsets.wOffset + tokenRow * kHeadDim + kIdx);
                 AscendC::Muls(floatUb, floatUb, weight, offsets.vBlockDim);
