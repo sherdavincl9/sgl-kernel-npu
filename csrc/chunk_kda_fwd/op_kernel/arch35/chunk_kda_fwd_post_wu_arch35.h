@@ -321,7 +321,7 @@ __aicore__ inline T FloatToType(float value)
     return static_cast<T>(value);
 }
 
-template <typename T, typename GK_T = float, typename BETA_T = float>
+template <typename T, typename GK_T = float>
 class ChunkKdaFwdPostWuKernel {
 public:
     using OUT_T = T;
@@ -338,7 +338,6 @@ public:
         k_.SetGlobalBuffer((__gm__ T *)k);
         v_.SetGlobalBuffer((__gm__ T *)v);
         gk_.SetGlobalBuffer((__gm__ GK_T *)gk);
-        beta_.SetGlobalBuffer((__gm__ BETA_T *)beta);
         if (initialState != nullptr) {
             initialState_.SetGlobalBuffer((__gm__ float *)initialState);
         }
@@ -1950,7 +1949,6 @@ private:
     GlobalTensor<T> k_;
     GlobalTensor<T> v_;
     GlobalTensor<GK_T> gk_;
-    GlobalTensor<BETA_T> beta_;
     GlobalTensor<float> initialState_;
     GlobalTensor<OUT_T> o_;
     GlobalTensor<float> finalState_;
@@ -2010,7 +2008,7 @@ private:
 };
 } // namespace
 
-template <typename T, typename GK_T, typename BETA_T, typename TilingData>
+template <typename T, typename GK_T, typename TilingData>
 __aicore__ inline void RunChunkKdaPostWu(GM_ADDR q, GM_ADDR k, GM_ADDR v, GM_ADDR gk, GM_ADDR beta,
                                          GM_ADDR initialState, GM_ADDR cuSeqlens, GM_ADDR chunkIndices, GM_ADDR wSeed,
                                          GM_ADDR akk, GM_ADDR uSeed, GM_ADDR w, GM_ADDR u, GM_ADDR kg, GM_ADDR vNew,
@@ -2018,14 +2016,14 @@ __aicore__ inline void RunChunkKdaPostWu(GM_ADDR q, GM_ADDR k, GM_ADDR v, GM_ADD
 {
     GM_ADDR postScratch = userWorkspace + tiling.postWuScratchOffset;
     if ASCEND_IS_AIC {
-        ChunkKdaFwdPostWuKernel<T, GK_T, BETA_T> op;
+        ChunkKdaFwdPostWuKernel<T, GK_T> op;
         op.Init(q, k, v, gk, beta, initialState, cuSeqlens, chunkIndices, wSeed, akk, uSeed, nullptr, userWorkspace,
                 userWorkspace, userWorkspace, akk, w, u, userWorkspace, kg, vNew, postScratch, postScratch, tiling,
                 &pipe, false);
         op.ProcessAic();
     }
     if ASCEND_IS_AIV {
-        ChunkKdaFwdPostWuKernel<T, GK_T, BETA_T> op;
+        ChunkKdaFwdPostWuKernel<T, GK_T> op;
         op.Init(q, k, v, gk, beta, initialState, cuSeqlens, chunkIndices, wSeed, akk, uSeed, nullptr, userWorkspace,
                 userWorkspace, userWorkspace, akk, w, u, userWorkspace, kg, vNew, postScratch, postScratch, tiling,
                 &pipe);

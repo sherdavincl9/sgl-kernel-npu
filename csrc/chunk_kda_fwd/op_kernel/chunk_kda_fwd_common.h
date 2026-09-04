@@ -220,7 +220,7 @@ __aicore__ inline void RunFrontEnd(
     pipe.Reset();
 
     if (!tiling.fusePostWu && !tiling.fusePostWuIntoFwdH) {
-        KdaPostWu::RunChunkKdaPostWu<T, GK_T, BETA_T>(
+        KdaPostWu::RunChunkKdaPostWu<T, GK_T>(
             q, k, v, addresses.gk, beta, initialState, cuSeqlens,
             chunkIndices, wSeed, akk, uSeed,
             addresses.w, addresses.u, addresses.kg, addresses.vNew,
@@ -248,7 +248,7 @@ __aicore__ inline void RunFwdH(
     stateOp.Process();
 }
 
-template <typename T, typename BETA_T, typename TilingData>
+template <typename T, typename TilingData>
 __aicore__ inline void RunGenericBackEnd(
     GM_ADDR q, GM_ADDR k, GM_ADDR v, GM_ADDR beta, GM_ADDR initialState,
     GM_ADDR cuSeqlens, GM_ADDR chunkIndices, GM_ADDR aqk, GM_ADDR attnOut,
@@ -266,13 +266,13 @@ __aicore__ inline void RunGenericBackEnd(
     }
     SyncAll<false>();
     TPipe pipe;
-    KdaFinalize::RunChunkKdaOutput<T, float, BETA_T>(
+    KdaFinalize::RunChunkKdaOutput<T, float>(
         q, k, v, addresses.gk, beta, initialState, cuSeqlens,
         chunkIndices, addresses.qgScaled, aqk,
         addresses.vNew, addresses.h, attnOut, userWorkspace, tiling, pipe);
 }
 
-template <typename T, typename BETA_T, typename TilingData>
+template <typename T, typename TilingData>
 __aicore__ inline void RunGenericBackEnd(
     GM_ADDR q, GM_ADDR k, GM_ADDR v, GM_ADDR beta, GM_ADDR initialState,
     GM_ADDR cuSeqlens, GM_ADDR chunkIndices, GM_ADDR aqk, GM_ADDR attnOut,
@@ -289,7 +289,7 @@ __aicore__ inline void RunGenericBackEnd(
             userWorkspace, tiling);
     }
     SyncAll<false>();
-    KdaFinalize::RunChunkKdaOutput<T, float, BETA_T>(
+    KdaFinalize::RunChunkKdaOutput<T, float>(
         q, k, v, addresses.gk, beta, initialState, cuSeqlens,
         chunkIndices, addresses.qgScaled, aqk,
         addresses.vNew, addresses.h, attnOut, userWorkspace, tiling, pipe);
@@ -315,11 +315,11 @@ __aicore__ inline void RunGeneric(
         chunkIndices, aqk, akk, addresses, userWorkspace, tiling, pipe);
     if (!tiling.isVarLen && tiling.seqlen % tiling.chunkSize == 0) {
         pipe.Destroy();
-        RunGenericBackEnd<T, BETA_T, TilingData>(
+        RunGenericBackEnd<T, TilingData>(
             q, k, v, beta, initialState, cuSeqlens, chunkIndices, aqk,
             attnOut, addresses, userWorkspace, tiling);
     } else {
-        RunGenericBackEnd<T, BETA_T, TilingData>(
+        RunGenericBackEnd<T, TilingData>(
             q, k, v, beta, initialState, cuSeqlens, chunkIndices, aqk,
             attnOut, addresses, userWorkspace, tiling, pipe);
     }
@@ -331,7 +331,7 @@ __aicore__ inline void RunGeneric(
             q, k, v, g, beta, aLog, dtBias, initialState, cuSeqlens,
             chunkIndices, aqk, akk, addresses, userWorkspace, tiling, pipe);
     }
-    RunGenericBackEnd<T, BETA_T, TilingData>(
+    RunGenericBackEnd<T, TilingData>(
         q, k, v, beta, initialState, cuSeqlens, chunkIndices, aqk,
         attnOut, addresses, userWorkspace, tiling);
 #endif

@@ -235,7 +235,7 @@ __aicore__ inline T FloatToType(float value)
     return static_cast<T>(value);
 }
 
-template <typename T, typename GK_T = float, typename BETA_T = float>
+template <typename T, typename GK_T = float>
 class ChunkKdaFwdFinalizeKernel {
 public:
     using OUT_T = float;
@@ -252,7 +252,6 @@ public:
         k_.SetGlobalBuffer((__gm__ T *)k);
         v_.SetGlobalBuffer((__gm__ T *)v);
         gk_.SetGlobalBuffer((__gm__ GK_T *)gk);
-        beta_.SetGlobalBuffer((__gm__ BETA_T *)beta);
         if (initialState != nullptr) {
             initialState_.SetGlobalBuffer((__gm__ float *)initialState);
         }
@@ -1427,7 +1426,6 @@ private:
     GlobalTensor<T> k_;
     GlobalTensor<T> v_;
     GlobalTensor<GK_T> gk_;
-    GlobalTensor<BETA_T> beta_;
     GlobalTensor<float> initialState_;
     GlobalTensor<OUT_T> o_;
     GlobalTensor<float> finalState_;
@@ -1488,7 +1486,7 @@ private:
 };
 } // namespace
 
-template <typename T, typename GK_T, typename BETA_T, typename TilingData>
+template <typename T, typename GK_T, typename TilingData>
 __aicore__ inline void RunChunkKdaOutput(GM_ADDR q, GM_ADDR k, GM_ADDR v, GM_ADDR gk, GM_ADDR beta,
                                          GM_ADDR initialState, GM_ADDR cuSeqlens, GM_ADDR chunkIndices,
                                          GM_ADDR qgScaled, GM_ADDR aqk, GM_ADDR propagatedVNew, GM_ADDR propagatedH,
@@ -1500,14 +1498,14 @@ __aicore__ inline void RunChunkKdaOutput(GM_ADDR q, GM_ADDR k, GM_ADDR v, GM_ADD
     GM_ADDR stateScratch = outputScratch;
     GM_ADDR localScratch = outputScratch + outputElements * sizeof(float);
     if ASCEND_IS_AIC {
-        ChunkKdaFwdFinalizeKernel<T, GK_T, BETA_T> op;
+        ChunkKdaFwdFinalizeKernel<T, GK_T> op;
         op.Init(q, k, v, gk, beta, initialState, cuSeqlens, chunkIndices, qgScaled, aqk, propagatedVNew, propagatedH,
                 stateScratch, userWorkspace, aqk, userWorkspace, userWorkspace, localScratch, userWorkspace,
                 userWorkspace, o, propagatedH, outputScratch, tiling, &pipe, false);
         op.ProcessAic();
     }
     if ASCEND_IS_AIV {
-        ChunkKdaFwdFinalizeKernel<T, GK_T, BETA_T> op;
+        ChunkKdaFwdFinalizeKernel<T, GK_T> op;
         op.Init(q, k, v, gk, beta, initialState, cuSeqlens, chunkIndices, qgScaled, aqk, propagatedVNew, propagatedH,
                 stateScratch, userWorkspace, aqk, userWorkspace, userWorkspace, localScratch, userWorkspace,
                 userWorkspace, o, propagatedH, outputScratch, tiling, &pipe);

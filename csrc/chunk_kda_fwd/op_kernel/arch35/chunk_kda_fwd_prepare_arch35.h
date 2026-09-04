@@ -4756,7 +4756,7 @@ __aicore__ inline void RunChunkKdaPrepare(GM_ADDR q, GM_ADDR k, GM_ADDR v, GM_AD
                 prepareScratch, tiling, &pipe, false, storeQG);
         if (tiling.fusePostWu) {
 #if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
-            KdaPostWu::ChunkKdaFwdPostWuKernel<T, GK_T, BETA_T> postWu;
+            KdaPostWu::ChunkKdaFwdPostWuKernel<T, GK_T> postWu;
             postWu.Init(nullptr, k, nullptr, gk, beta, initialState, cuSeqlens, chunkIndices, wSeed, akk, uSeed,
                         nullptr, userWorkspace, userWorkspace, userWorkspace, akk, wSeed, uSeed, userWorkspace, finalKg,
                         userWorkspace, prepareScratch, prepareScratch, tiling, &pipe, false);
