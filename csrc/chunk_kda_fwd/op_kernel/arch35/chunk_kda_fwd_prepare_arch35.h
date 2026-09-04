@@ -121,6 +121,9 @@ constexpr uint32_t KDA_SCORE_SCRATCH_KG = 2;
 constexpr uint64_t KDA_WORKSPACE_ALIGN = 512;
 constexpr uint32_t KDA_GATE_TILE_ROWS = 16;
 constexpr uint32_t KDA_GATE_PIPELINE_DEPTH = 3;
+// beta is staged in UB as fp32 or bf16; the slot is always sized for the wider one
+// so the UB layout does not depend on the beta dtype.
+constexpr uint64_t KDA_BETA_STAGE_BYTES = sizeof(float);
 constexpr uint32_t KDA_AIV_UB_BUDGET_BYTES = 192 * 1024;
 constexpr uint32_t KDA_LOCAL_GK_FLOAT_OFFSET = 10 * 1024;
 constexpr uint32_t KDA_SCALED_QG_FLOAT_OFFSET = 18 * 1024;
@@ -777,7 +780,7 @@ __aicore__ inline T FloatToType(float value)
     return static_cast<T>(value);
 }
 
-template <bool SAFE_GATE, typename T, typename GK_T = float, typename BETA_T = float, uint32_t COMPILE_BT = 0,
+template <bool SAFE_GATE, typename T, typename GK_T = float, uint32_t COMPILE_BT = 0,
           uint32_t COMPILE_K = 0, uint32_t COMPILE_V = 0>
 class ChunkKdaFwdPrepareKernel {
 public:
@@ -800,7 +803,8 @@ public:
         rawG_.SetGlobalBuffer((__gm__ float *)rawG);
         aLog_.SetGlobalBuffer((__gm__ float *)aLog);
         dtBias_.SetGlobalBuffer((__gm__ float *)dtBias);
-        beta_.SetGlobalBuffer((__gm__ BETA_T *)beta);
+        betaFp32_.SetGlobalBuffer((__gm__ float *)beta);
+        betaBf16_.SetGlobalBuffer((__gm__ bfloat16_t *)beta);
         if (initialState != nullptr) {
             initialState_.SetGlobalBuffer((__gm__ float *)initialState);
         }
@@ -851,6 +855,7 @@ public:
         lowerBound_ = tiling.lowerBound;
         storeQG_ = storeQG;
         usedCoreNum_ = tiling.prepareUsedCoreNum;
+        betaIsFp32_ = tiling.betaDataType == 0;
 #if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
         if constexpr (SAFE_GATE && !IsSameType<T, float>::value) {
             headPairMode_ = KDA_ARCH35_ENABLE_HEAD_PAIR && HV_ % KDA_SCORE_LANES == 0;
@@ -1143,7 +1148,7 @@ private:
         uint64_t bytesPerRow = K_ * KDA_GATE_PIPELINE_DEPTH * (3 * sizeof(T) + sizeof(GK_T));
 #if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
         if constexpr (SAFE_GATE && COMPILE_BT == 64 && COMPILE_K == 128 && COMPILE_V == 128) {
-            bytesPerRow = GateBufferDepth() * (K_ * (4 * sizeof(T) + sizeof(GK_T)) + sizeof(BETA_T));
+            bytesPerRow = GateBufferDepth() * (K_ * (4 * sizeof(T) + sizeof(GK_T)) + KDA_BETA_STAGE_BYTES);
         }
 #endif
         uint64_t rows = bytesPerRow == 0 ? 0 : availableBytes / bytesPerRow;
@@ -1164,7 +1169,7 @@ private:
     {
 #if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
         if constexpr (SAFE_GATE && COMPILE_BT == 64 && COMPILE_K == 128 && COMPILE_V == 128) {
-            return GateStageElems() * (3 * sizeof(T) + sizeof(GK_T)) + GatePipelineRows() * sizeof(BETA_T);
+            return GateStageElems() * (3 * sizeof(T) + sizeof(GK_T)) + GatePipelineRows() * KDA_BETA_STAGE_BYTES;
         }
 #endif
         return GateStageElems() * (2 * sizeof(T) + sizeof(GK_T));
@@ -1194,10 +1199,11 @@ private:
         return gateWritebackBuf_.Get<T>()[byteOffset / sizeof(T)];
     }
 
-    __aicore__ inline LocalTensor<BETA_T> GateBetaTyped(uint64_t slot)
+    template <typename BetaT>
+    __aicore__ inline LocalTensor<BetaT> GateBetaStaging(uint64_t slot)
     {
         uint64_t byteOffset = slot * GateInputSlotBytes() + GateStageElems() * (3 * sizeof(T) + sizeof(GK_T));
-        return gateWritebackBuf_.Get<BETA_T>()[byteOffset / sizeof(BETA_T)];
+        return gateWritebackBuf_.Get<BetaT>()[byteOffset / sizeof(BetaT)];
     }
 
     __aicore__ inline LocalTensor<T> GateKgTyped(uint64_t slot)
@@ -1250,9 +1256,14 @@ private:
 #if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
         if constexpr (SAFE_GATE && COMPILE_BT == 64 && COMPILE_K == 128 && COMPILE_V == 128) {
             LocalTensor<T> vTyped = GateVTyped(slot);
-            LocalTensor<BETA_T> betaTyped = GateBetaTyped(slot);
             CopyRowsIn(vTyped, v_, VInputOffset(b, hv, token, 0), rows, V_, inputSequenceMajor_ ? HV_ * V_ : V_);
-            CopyVectorIn(betaTyped, beta_, BetaOffset(b, hv, token), rows);
+            if (betaIsFp32_) {
+                LocalTensor<float> betaTyped = GateBetaStaging<float>(slot);
+                CopyVectorIn(betaTyped, betaFp32_, BetaOffset(b, hv, token), rows);
+            } else {
+                LocalTensor<bfloat16_t> betaTyped = GateBetaStaging<bfloat16_t>(slot);
+                CopyVectorIn(betaTyped, betaBf16_, BetaOffset(b, hv, token), rows);
+            }
         }
 #endif
         SetFlag<HardEvent::MTE2_V>(mte2ToVEvent_);
@@ -1442,6 +1453,29 @@ private:
         PipeBarrier<PIPE_V>();
     }
 
+    // beta arrives as fp32 or bf16 (tiling.betaDataType).  Both are resolved at
+    // runtime so the whole prepare kernel stays independent of the beta dtype --
+    // templating on it doubled every Prepare instantiation for one vector cast.
+    __aicore__ inline void LoadBetaAsFloatRow(uint64_t srcOffset, LocalTensor<float> &dst, uint64_t count)
+    {
+        if (betaIsFp32_) {
+            LoadAsFloatRow(betaFp32_, srcOffset, dst, count);
+        } else {
+            LoadAsFloatRow(betaBf16_, srcOffset, dst, count);
+        }
+    }
+
+    __aicore__ inline void ConvertStagedBeta(uint64_t slot, LocalTensor<float> &dst, uint64_t count)
+    {
+        if (betaIsFp32_) {
+            LocalTensor<float> staged = GateBetaStaging<float>(slot);
+            Adds(dst, staged, 0.0f, static_cast<uint32_t>(count));
+        } else {
+            LocalTensor<bfloat16_t> staged = GateBetaStaging<bfloat16_t>(slot);
+            Cast(dst, staged, RoundMode::CAST_NONE, static_cast<uint32_t>(count));
+        }
+    }
+
     template <typename CopyT>
     __aicore__ inline void LoadAsFloatVector(GlobalTensor<CopyT> &src, uint64_t srcOffset, LocalTensor<float> &dst,
                                              LocalTensor<CopyT> &typedScratch, uint64_t count)
@@ -1541,7 +1575,6 @@ private:
 #if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
             LocalTensor<SCORE_T> kgScore = GateKgTyped(qwSlot).template ReinterpretCast<SCORE_T>();
             LocalTensor<T> vTyped = GateVTyped(qwSlot);
-            LocalTensor<BETA_T> betaTyped = GateBetaTyped(qwSlot);
             LocalTensor<T> directQ = GateDirectQ(qwSlot);
             LocalTensor<T> directW = GateDirectW(qwSlot);
             LocalTensor<T> directV = GateDirectV(qwSlot);
@@ -1567,11 +1600,7 @@ private:
             }
 #endif
 #if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
-            if constexpr (IsSameType<BETA_T, float>::value) {
-                Adds(betaFp32, betaTyped, 0.0f, static_cast<uint32_t>(tileRows));
-            } else {
-                Cast(betaFp32, betaTyped, RoundMode::CAST_NONE, static_cast<uint32_t>(tileRows));
-            }
+            ConvertStagedBeta(qwSlot, betaFp32, tileRows);
             PipeBarrier<PIPE_V>();
 #endif
             if (qwOutputPending) {
@@ -1858,7 +1887,6 @@ private:
             LocalTensor<float> outFp32 = arena[4 * elems];
 #else
             LocalTensor<T> vTyped = GateVTyped(gateSlot);
-            LocalTensor<BETA_T> betaTyped = GateBetaTyped(gateSlot);
             LocalTensor<T> directQ = GateDirectQ(gateSlot);
             LocalTensor<T> directW = GateDirectW(gateSlot);
             LocalTensor<T> directV = GateDirectV(gateSlot);
@@ -1877,11 +1905,7 @@ private:
             }
 #endif
 #if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
-            if constexpr (IsSameType<BETA_T, float>::value) {
-                Adds(betaFp32, betaTyped, 0.0f, static_cast<uint32_t>(tileRows));
-            } else {
-                Cast(betaFp32, betaTyped, RoundMode::CAST_NONE, static_cast<uint32_t>(tileRows));
-            }
+            ConvertStagedBeta(gateSlot, betaFp32, tileRows);
             PipeBarrier<PIPE_V>();
 #endif
             uint64_t nextTileRow = tileRow + maxRows;
@@ -2896,7 +2920,7 @@ private:
         LocalTensor<float> maskLocal = arena[3 * KDA_SOLVE_MATRIX_ELEMENTS + KDA_SOLVE_BT + 512];
         LocalTensor<float> oneHotLocal = arena[3 * KDA_SOLVE_MATRIX_ELEMENTS + KDA_SOLVE_BT + 512 + KDA_SOLVE_BT];
 
-        LoadAsFloatRow(beta_, BetaOffset(b, hv, start), betaLocal, KDA_SOLVE_BT);
+        LoadBetaAsFloatRow(BetaOffset(b, hv, start), betaLocal, KDA_SOLVE_BT);
         Brcb(betaBrcb, betaLocal, 8, {1, 8});
         PipeBarrier<PIPE_V>();
 
@@ -2949,7 +2973,7 @@ private:
         FillLocalFloat(betaLocal, 0.0f, KDA_SOLVE_BT);
         SetFlag<HardEvent::V_MTE2>(vToMte2Event_);
         WaitFlag<HardEvent::V_MTE2>(vToMte2Event_);
-        LoadAsFloatRow(beta_, BetaOffset(b, hv, start), betaLocal, curT);
+        LoadBetaAsFloatRow(BetaOffset(b, hv, start), betaLocal, curT);
         Brcb(betaBrcb, betaLocal, 8, {1, 8});
         PipeBarrier<PIPE_V>();
 
@@ -3099,7 +3123,7 @@ private:
         WaitFlag<HardEvent::V_MTE2>(vToMte2Event_);
         if (validRowCount > 0) {
             if (!scoreIncludesBeta) {
-                LoadAsFloatRow(beta_, BetaOffset(b, hv, token), betaLocal, validRowCount);
+                LoadBetaAsFloatRow(BetaOffset(b, hv, token), betaLocal, validRowCount);
             }
             if (curT < BT_) {
                 DataCopy(
@@ -3838,7 +3862,7 @@ private:
                 if (tileCount > tileRows) {
                     tileCount = tileRows;
                 }
-                LoadAsFloatRow(beta_, BetaOffset(b, hv, start + rowBegin + tileRow), betaLocal, tileCount);
+                LoadBetaAsFloatRow(BetaOffset(b, hv, start + rowBegin + tileRow), betaLocal, tileCount);
                 ScaleRowsByBeta(w_, w_, b, hv, start, rowBegin + tileRow, tileCount, K_, betaLocal, betaBrcb,
                                 matrixLocal);
                 ScaleRowsByBeta(v_, vNew_, b, hv, start, rowBegin + tileRow, tileCount, V_, betaLocal, betaBrcb,
@@ -3847,7 +3871,7 @@ private:
             return;
         }
 #endif
-        LoadAsFloatRow(beta_, BetaOffset(b, hv, start + rowBegin), betaLocal, rowCount);
+        LoadBetaAsFloatRow(BetaOffset(b, hv, start + rowBegin), betaLocal, rowCount);
 #if !defined(__CCE_AICORE__) || __CCE_AICORE__ != 310
         Brcb(betaBrcb, betaLocal, static_cast<uint8_t>((rowCount + 7) / 8), {1, 8});
         PipeBarrier<PIPE_V>();
@@ -4662,7 +4686,8 @@ private:
     GlobalTensor<float> rawG_;
     GlobalTensor<float> aLog_;
     GlobalTensor<float> dtBias_;
-    GlobalTensor<BETA_T> beta_;
+    GlobalTensor<float> betaFp32_;
+    GlobalTensor<bfloat16_t> betaBf16_;
     GlobalTensor<float> initialState_;
     GlobalTensor<OUT_T> o_;
     GlobalTensor<float> finalState_;
@@ -4727,6 +4752,7 @@ private:
     bool hasALog_ = false;
     bool hasDtBias_ = false;
     bool storeQG_ = true;
+    bool betaIsFp32_ = true;
     float lowerBound_ = -5.0f;
     uint64_t usedCoreNum_ = 1;
     uint64_t solveCoreIdx_ = 0;
@@ -4737,7 +4763,7 @@ private:
 };
 } // namespace
 
-template <bool SAFE_GATE, typename T, typename GK_T, typename BETA_T, typename TilingData, uint32_t COMPILE_BT = 0,
+template <bool SAFE_GATE, typename T, typename GK_T, typename TilingData, uint32_t COMPILE_BT = 0,
           uint32_t COMPILE_K = 0, uint32_t COMPILE_V = 0>
 __aicore__ inline void RunChunkKdaPrepare(GM_ADDR q, GM_ADDR k, GM_ADDR v, GM_ADDR gk, GM_ADDR rawG, GM_ADDR aLog,
                                           GM_ADDR dtBias, GM_ADDR beta, GM_ADDR initialState, GM_ADDR cuSeqlens,
@@ -4750,7 +4776,7 @@ __aicore__ inline void RunChunkKdaPrepare(GM_ADDR q, GM_ADDR k, GM_ADDR v, GM_AD
     GM_ADDR prepareScratch = userWorkspace + tiling.prepareScratchOffset;
 
     if ASCEND_IS_AIC {
-        ChunkKdaFwdPrepareKernel<SAFE_GATE, T, GK_T, BETA_T, COMPILE_BT, COMPILE_K, COMPILE_V> op;
+        ChunkKdaFwdPrepareKernel<SAFE_GATE, T, GK_T, COMPILE_BT, COMPILE_K, COMPILE_V> op;
         op.Init(q, k, v, gk, rawG, aLog, dtBias, beta, initialState, cuSeqlens, chunkIndices, nullptr, nullptr, nullptr,
                 nullptr, aqk, userWorkspace, aqkFp32, akkFp32, wSeed, akk, qg, qgScaled, uSeed, userWorkspace, finalKg,
                 prepareScratch, tiling, &pipe, false, storeQG);
@@ -4769,7 +4795,7 @@ __aicore__ inline void RunChunkKdaPrepare(GM_ADDR q, GM_ADDR k, GM_ADDR v, GM_AD
         }
     }
     if ASCEND_IS_AIV {
-        ChunkKdaFwdPrepareKernel<SAFE_GATE, T, GK_T, BETA_T, COMPILE_BT, COMPILE_K, COMPILE_V> op;
+        ChunkKdaFwdPrepareKernel<SAFE_GATE, T, GK_T, COMPILE_BT, COMPILE_K, COMPILE_V> op;
         op.Init(q, k, v, gk, rawG, aLog, dtBias, beta, initialState, cuSeqlens, chunkIndices, nullptr, nullptr, nullptr,
                 nullptr, aqk, userWorkspace, aqkFp32, akkFp32, wSeed, akk, qg, qgScaled, uSeed, userWorkspace, finalKg,
                 prepareScratch, tiling, &pipe, true, storeQG);

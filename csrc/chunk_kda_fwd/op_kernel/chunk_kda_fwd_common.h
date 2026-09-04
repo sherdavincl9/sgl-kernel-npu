@@ -185,7 +185,7 @@ __aicore__ inline void RunGateCumsum(
     }
 }
 
-template <bool SAFE_GATE, typename T, typename GK_T, typename BETA_T,
+template <bool SAFE_GATE, typename T, typename GK_T,
           typename TilingData, uint32_t COMPILE_BT, uint32_t COMPILE_K,
           uint32_t COMPILE_V>
 __aicore__ inline void RunFrontEnd(
@@ -210,7 +210,7 @@ __aicore__ inline void RunFrontEnd(
     }
 #endif
 
-    KdaPrepare::RunChunkKdaPrepare<SAFE_GATE, T, GK_T, BETA_T,
+    KdaPrepare::RunChunkKdaPrepare<SAFE_GATE, T, GK_T,
                                    TilingData, COMPILE_BT, COMPILE_K, COMPILE_V>(
         q, k, v, addresses.gk, g, aLog, dtBias, beta, initialState,
         cuSeqlens, chunkIndices, aqk, akk, addresses.qg,
@@ -295,7 +295,7 @@ __aicore__ inline void RunGenericBackEnd(
         addresses.vNew, addresses.h, attnOut, userWorkspace, tiling, pipe);
 }
 
-template <bool SAFE_GATE, typename T, typename BETA_T, typename TilingData,
+template <bool SAFE_GATE, typename T, typename TilingData,
           uint32_t COMPILE_BT, uint32_t COMPILE_K, uint32_t COMPILE_V>
 __aicore__ inline void RunGeneric(
     GM_ADDR q, GM_ADDR k, GM_ADDR v, GM_ADDR g, GM_ADDR beta,
@@ -309,7 +309,7 @@ __aicore__ inline void RunGeneric(
         finalState, gk, w, u, qg, kg, vNew, h, userWorkspace, tiling);
 #if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
     TPipe pipe;
-    RunFrontEnd<SAFE_GATE, T, float, BETA_T, TilingData,
+    RunFrontEnd<SAFE_GATE, T, float, TilingData,
                 COMPILE_BT, COMPILE_K, COMPILE_V>(
         q, k, v, g, beta, aLog, dtBias, initialState, cuSeqlens,
         chunkIndices, aqk, akk, addresses, userWorkspace, tiling, pipe);
@@ -326,7 +326,7 @@ __aicore__ inline void RunGeneric(
 #else
     {
         TPipe pipe;
-        RunFrontEnd<SAFE_GATE, T, float, BETA_T, TilingData,
+        RunFrontEnd<SAFE_GATE, T, float, TilingData,
                     COMPILE_BT, COMPILE_K, COMPILE_V>(
             q, k, v, g, beta, aLog, dtBias, initialState, cuSeqlens,
             chunkIndices, aqk, akk, addresses, userWorkspace, tiling, pipe);

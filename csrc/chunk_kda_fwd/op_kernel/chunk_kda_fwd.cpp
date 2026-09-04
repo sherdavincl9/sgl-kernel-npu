@@ -22,7 +22,7 @@
 
 namespace KdaForward {
 
-template <bool SAFE_GATE, typename T, typename BETA_T, typename TilingData,
+template <bool SAFE_GATE, typename T, typename TilingData,
           uint32_t COMPILE_BT, uint32_t COMPILE_K, uint32_t COMPILE_V>
 __aicore__ inline void DispatchGeneric(
     GM_ADDR q, GM_ADDR k, GM_ADDR v, GM_ADDR g, GM_ADDR beta,
@@ -32,7 +32,7 @@ __aicore__ inline void DispatchGeneric(
     GM_ADDR w, GM_ADDR u, GM_ADDR qg, GM_ADDR kg, GM_ADDR vNew, GM_ADDR h,
     GM_ADDR userWorkspace, const TilingData &tiling)
 {
-    RunGeneric<SAFE_GATE, T, BETA_T, TilingData,
+    RunGeneric<SAFE_GATE, T, TilingData,
                COMPILE_BT, COMPILE_K, COMPILE_V>(
         q, k, v, g, beta, aLog, dtBias, initialState, cuSeqlens,
         chunkIndices, attnOut, finalState, gk, aqk, akk, w, u, qg, kg,
@@ -40,7 +40,7 @@ __aicore__ inline void DispatchGeneric(
 }
 
 #if KDA_COMPILE_ARCH35_FAST_PATH
-template <typename T, typename BETA_T, typename TilingData,
+template <typename T, typename TilingData,
           uint32_t COMPILE_BT, uint32_t COMPILE_K, uint32_t COMPILE_V>
 __aicore__ inline void DispatchArch35SafeGate(
     GM_ADDR q, GM_ADDR k, GM_ADDR v, GM_ADDR g, GM_ADDR beta,
@@ -52,13 +52,13 @@ __aicore__ inline void DispatchArch35SafeGate(
 {
     AscendC::TPipe pipe;
     if (tiling.safeGate) {
-        arch35::Run<true, T, BETA_T, TilingData,
+        arch35::Run<true, T, TilingData,
                     COMPILE_BT, COMPILE_K, COMPILE_V>(
             q, k, v, g, beta, aLog, dtBias, initialState, cuSeqlens,
             chunkIndices, attnOut, finalState, gk, aqk, akk, w, u, qg,
             kg, vNew, h, userWorkspace, tiling, pipe);
     } else {
-        arch35::Run<false, T, BETA_T, TilingData,
+        arch35::Run<false, T, TilingData,
                     COMPILE_BT, COMPILE_K, COMPILE_V>(
             q, k, v, g, beta, aLog, dtBias, initialState, cuSeqlens,
             chunkIndices, attnOut, finalState, gk, aqk, akk, w, u, qg,
@@ -66,7 +66,7 @@ __aicore__ inline void DispatchArch35SafeGate(
     }
 }
 #elif defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
-template <typename T, typename BETA_T, typename TilingData,
+template <typename T, typename TilingData,
           uint32_t COMPILE_BT, uint32_t COMPILE_K, uint32_t COMPILE_V>
 __aicore__ inline void DispatchArch35SafeGate(
     GM_ADDR, GM_ADDR, GM_ADDR, GM_ADDR, GM_ADDR,
@@ -80,7 +80,7 @@ __aicore__ inline void DispatchArch35SafeGate(
 }
 #endif
 
-template <typename T, typename BETA_T, typename TilingData,
+template <typename T, typename TilingData,
           uint32_t COMPILE_BT, uint32_t COMPILE_K, uint32_t COMPILE_V>
 __aicore__ inline void DispatchGenericSafeGate(
     GM_ADDR q, GM_ADDR k, GM_ADDR v, GM_ADDR g, GM_ADDR beta,
@@ -91,13 +91,13 @@ __aicore__ inline void DispatchGenericSafeGate(
     GM_ADDR userWorkspace, const TilingData &tiling)
 {
     if (tiling.safeGate) {
-        DispatchGeneric<true, T, BETA_T, TilingData,
+        DispatchGeneric<true, T, TilingData,
                         COMPILE_BT, COMPILE_K, COMPILE_V>(
             q, k, v, g, beta, aLog, dtBias, initialState, cuSeqlens,
             chunkIndices, attnOut, finalState, gk, aqk, akk, w, u, qg,
             kg, vNew, h, userWorkspace, tiling);
     } else {
-        DispatchGeneric<false, T, BETA_T, TilingData,
+        DispatchGeneric<false, T, TilingData,
                         COMPILE_BT, COMPILE_K, COMPILE_V>(
             q, k, v, g, beta, aLog, dtBias, initialState, cuSeqlens,
             chunkIndices, attnOut, finalState, gk, aqk, akk, w, u, qg,
@@ -156,48 +156,21 @@ extern "C" KDA_FWD_SCHEDULE_MODE __global__ __aicore__ void chunk_kda_fwd(
                              tilingData->vHeadDim == 128;
     if (useFastPath) {
 #if defined(__CCE_AICORE__) && __CCE_AICORE__ == 310
-        if (tilingData->betaDataType == 0) {
-            KdaForward::DispatchArch35SafeGate<bfloat16_t, float,
-                                               ChunkKdaFwdTilingData, 64, 128, 128>(
-                q, k, v, g, beta, a_log, dt_bias, initial_state, cu_seqlens,
-                chunk_indices, attn_out, final_state, gk, aqk, akk, w, u, qg,
-                kg, v_new, h, userWorkspace, *tilingData);
-        } else {
-            KdaForward::DispatchArch35SafeGate<bfloat16_t, bfloat16_t,
-                                               ChunkKdaFwdTilingData, 64, 128, 128>(
-                q, k, v, g, beta, a_log, dt_bias, initial_state, cu_seqlens,
-                chunk_indices, attn_out, final_state, gk, aqk, akk, w, u, qg,
-                kg, v_new, h, userWorkspace, *tilingData);
-        }
+        KdaForward::DispatchArch35SafeGate<bfloat16_t, ChunkKdaFwdTilingData, 64, 128, 128>(
+            q, k, v, g, beta, a_log, dt_bias, initial_state, cu_seqlens,
+            chunk_indices, attn_out, final_state, gk, aqk, akk, w, u, qg,
+            kg, v_new, h, userWorkspace, *tilingData);
 #else
-        if (tilingData->betaDataType == 0) {
-            KdaForward::DispatchGenericSafeGate<bfloat16_t, float,
-                                                ChunkKdaFwdTilingData, 64, 128, 128>(
-                q, k, v, g, beta, a_log, dt_bias, initial_state, cu_seqlens,
-                chunk_indices, attn_out, final_state, gk, aqk, akk, w, u, qg,
-                kg, v_new, h, userWorkspace, *tilingData);
-        } else {
-            KdaForward::DispatchGenericSafeGate<bfloat16_t, bfloat16_t,
-                                                ChunkKdaFwdTilingData, 64, 128, 128>(
-                q, k, v, g, beta, a_log, dt_bias, initial_state, cu_seqlens,
-                chunk_indices, attn_out, final_state, gk, aqk, akk, w, u, qg,
-                kg, v_new, h, userWorkspace, *tilingData);
-        }
+        KdaForward::DispatchGenericSafeGate<bfloat16_t, ChunkKdaFwdTilingData, 64, 128, 128>(
+            q, k, v, g, beta, a_log, dt_bias, initial_state, cu_seqlens,
+            chunk_indices, attn_out, final_state, gk, aqk, akk, w, u, qg,
+            kg, v_new, h, userWorkspace, *tilingData);
 #endif
     } else {
-        if (tilingData->betaDataType == 0) {
-            KdaForward::DispatchGenericSafeGate<bfloat16_t, float,
-                                                ChunkKdaFwdTilingData, 0, 0, 0>(
-                q, k, v, g, beta, a_log, dt_bias, initial_state, cu_seqlens,
-                chunk_indices, attn_out, final_state, gk, aqk, akk, w, u, qg,
-                kg, v_new, h, userWorkspace, *tilingData);
-        } else {
-            KdaForward::DispatchGenericSafeGate<bfloat16_t, bfloat16_t,
-                                                ChunkKdaFwdTilingData, 0, 0, 0>(
-                q, k, v, g, beta, a_log, dt_bias, initial_state, cu_seqlens,
-                chunk_indices, attn_out, final_state, gk, aqk, akk, w, u, qg,
-                kg, v_new, h, userWorkspace, *tilingData);
-        }
+        KdaForward::DispatchGenericSafeGate<bfloat16_t, ChunkKdaFwdTilingData, 0, 0, 0>(
+            q, k, v, g, beta, a_log, dt_bias, initial_state, cu_seqlens,
+            chunk_indices, attn_out, final_state, gk, aqk, akk, w, u, qg,
+            kg, v_new, h, userWorkspace, *tilingData);
     }
 }
 

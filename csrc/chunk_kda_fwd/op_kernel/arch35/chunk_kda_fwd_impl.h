@@ -15,7 +15,7 @@
 
 namespace KdaForward::arch35 {
 
-template <bool SAFE_GATE, typename T, typename BETA_T, typename TilingData,
+template <bool SAFE_GATE, typename T, typename TilingData,
           uint32_t COMPILE_BT, uint32_t COMPILE_K, uint32_t COMPILE_V>
 __aicore__ inline void Run(
     GM_ADDR q, GM_ADDR k, GM_ADDR v, GM_ADDR g, GM_ADDR beta,
@@ -27,7 +27,7 @@ __aicore__ inline void Run(
 {
     const auto addresses = ResolveAddresses(
         finalState, gk, w, u, qg, kg, vNew, h, userWorkspace, tiling);
-    RunFrontEnd<SAFE_GATE, T, float, BETA_T, TilingData,
+    RunFrontEnd<SAFE_GATE, T, float, TilingData,
                 COMPILE_BT, COMPILE_K, COMPILE_V>(
         q, k, v, g, beta, aLog, dtBias, initialState, cuSeqlens,
         chunkIndices, aqk, akk, addresses, userWorkspace, tiling, pipe);
