@@ -24,28 +24,9 @@ class BlockEpilogue {
 
 } // namespace Catlass::Epilogue::Block
 
-#include "catlass/epilogue/block/block_epilogue_elemwise_no_source.hpp"
-#include "catlass/epilogue/block/kda_block_epilogue_elemwise_one_source.hpp"
-#include "catlass/epilogue/block/kda_block_epilogue_fa_softmax.hpp"
-#include "catlass/epilogue/block/block_epilogue_fa_rescale_o.hpp"
-#include "catlass/epilogue/block/kda_block_epilogue_mla_softmax.hpp"
-#include "catlass/epilogue/block/block_epilogue_mla_rescale_o.hpp"
-#include "catlass/epilogue/block/block_epilogue_mla_fd_rescale_o.hpp"
-#include "catlass/epilogue/block/kda_block_epilogue_per_token_dequant.hpp"
-#include "catlass/epilogue/block/block_epilogue_per_token_dequant_tla.hpp"
-#include "catlass/epilogue/block/kda_block_epilogue_gemm.hpp"
-#include "catlass/epilogue/block/kda_block_epilogue_gemv.hpp"
-#include "catlass/epilogue/block/kda_block_epilogue_mla_tp1_softmax.hpp"
-#include "catlass/epilogue/block/block_epilogue_mla_tp1_rescale_o.hpp"
-#include "catlass/epilogue/block/block_epilogue_online_softmax_no_mask.hpp"
-#include "catlass/epilogue/block/block_epilogue_rescale_o_no_split_row.hpp"
-#include "catlass/epilogue/block/block_epilogue_w4a4_per_token_per_channel_dequant.hpp"
-
-#if (defined(CATLASS_ARCH) && CATLASS_ARCH == 3510)
-#include "catlass/epilogue/block/block_epilogue_fa_softmax_ascend950.hpp"
-#include "catlass/epilogue/block/block_epilogue_fa_rescale_o_ascend950.hpp"
-#include "catlass/epilogue/block/block_epilogue_fixpipe.hpp"
-#include "catlass/epilogue/block/block_epilogue_per_group_per_block.hpp"
-#endif
+// chunk_kda_fwd only instantiates BlockEpilogue for its own FwdH policies
+// (EpilogueAtlasKdaFwdHVnew / EpilogueAtlasKdaFwdHUpdate), whose specializations
+// live under arch22|arch35/fwd_h/epilogue/block/ and are included by their users.
+// None of the upstream catlass epilogues were ever selected here.
 
 #endif // CATLASS_KDA_BLOCK_EPILOGUE_HPP

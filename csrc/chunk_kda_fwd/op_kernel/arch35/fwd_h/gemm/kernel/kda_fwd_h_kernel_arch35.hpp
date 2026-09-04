@@ -23,7 +23,6 @@
 #include "../../../../kernel_utils/block/block_mmad_pingpong_tla_kernel_utils.hpp"
 #include "../../../../kernel_utils/block/block_mmad_pingpong_tla_multi.hpp"
 #include "../../../../kernel_utils/block/block_mmad_pingpong_tla_preloadA_l1B.hpp"
-#include "catlass/gemm/block/kda_block_swizzle.hpp"
 #include "catlass/gemm/kda_gemm_dispatch_policy.hpp"
 #include "catlass/gemm/kda_gemm_type.hpp"
 #include "catlass/layout/kda_layout.hpp"
