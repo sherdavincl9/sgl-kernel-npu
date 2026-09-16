@@ -224,7 +224,8 @@ TORCH_LIBRARY_FRAGMENT(npu, m)
         "bool safe_gate=False, float lower_bound=-5.0, bool use_gate_in_kernel=False, "
         "bool state_v_first=False, bool output_final_state=True, bool output_gk=False, "
         "bool output_w=False, bool output_u=False, bool output_qg=False, "
-        "bool output_kg=False, bool output_v_new=False, bool output_h=False) "
+        "bool output_kg=False, bool output_v_new=False, bool output_h=False, "
+        "Tensor? cu_seqlens_cpu=None) "
         "-> (Tensor, Tensor?, Tensor?, Tensor, Tensor, Tensor?, Tensor?, Tensor?, Tensor?, Tensor?, Tensor?)");
 #ifdef SGL_KERNEL_ENABLE_A5_ONLY_OPS
     m.def(

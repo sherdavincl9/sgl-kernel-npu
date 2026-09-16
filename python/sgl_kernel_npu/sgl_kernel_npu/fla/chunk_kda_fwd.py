@@ -30,6 +30,7 @@ def chunk_kda_fwd(
     output_kg: bool = False,
     output_v_new: bool = False,
     output_h: bool = False,
+    cu_seqlens_cpu: Optional[torch.Tensor] = None,
 ) -> tuple:
     r"""Fused chunk KDA forward kernel (direct-launch NPU implementation).
 
@@ -52,6 +53,9 @@ def chunk_kda_fwd(
         use_gate_in_kernel: whether to compute the activated gate in-kernel.
         state_v_first: whether the state tensors have (V, K) last two dims.
         output_*: whether to materialize the corresponding intermediate output.
+        cu_seqlens_cpu: (N+1,) int64 CPU tensor with the same values as
+            cu_seqlens; required with cu_seqlens. The op reads it instead of
+            copying cu_seqlens to the host, so it never syncs the device.
 
     Returns:
         A tuple of length 11:
@@ -90,4 +94,5 @@ def chunk_kda_fwd(
         output_kg,
         output_v_new,
         output_h,
+        cu_seqlens_cpu,
     )

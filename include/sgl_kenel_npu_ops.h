@@ -302,7 +302,8 @@ chunk_kda_fwd(const at::Tensor &q, const at::Tensor &k, const at::Tensor &v,
               bool safeGate, double lowerBound, bool useGateInKernel,
               bool stateVFirst, bool outputFinalState, bool outputGk,
               bool outputW, bool outputU, bool outputQG, bool outputKg,
-              bool outputVNew, bool outputH);
+              bool outputVNew, bool outputH,
+              const c10::optional<at::Tensor> &cuSeqlensCpu);
 #ifdef SGL_KERNEL_ENABLE_A3_ONLY_OPS
 /**
  * @brief Sparse row copy: for each i where valid_mask[i] is true,
