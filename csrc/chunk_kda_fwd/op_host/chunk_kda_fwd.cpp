@@ -294,7 +294,9 @@ void ComputeTilingData(int64_t batch, int64_t seqlen, int64_t hNum, int64_t hvNu
 
     td.postWuScratchOffset = AlignWorkspace(cursor);
     if (!arch35Options.fusePostWu && !arch35Options.fusePostWuIntoFwdH) {
-        cursor = td.postWuScratchOffset + tokenHeads * kDim * sizeof(float);
+        // WScratchOffset reserves chunkSize rows per chunk, including tails.
+        // Packed token counts would let Cube writes overwrite later workspace.
+        cursor = td.postWuScratchOffset + hChunkCount * hvNum * chunkSize * kDim * sizeof(float);
     }
 
     td.fwdHWorkspaceBaseOffset = AlignWorkspace(cursor);
