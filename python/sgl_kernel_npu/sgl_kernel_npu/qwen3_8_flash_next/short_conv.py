@@ -156,9 +156,12 @@ def _packed_conv(
     channel = tl.arange(0, BLOCK)
     iw = tl.arange(0, BLOCK * K)
     # Reuse is safe only if this program visits the same channels in each batch.
-    REUSE: tl.constexpr = TASKS > GRID and GRID % tl.cdiv(C, BLOCK) == 0
+    # Keep the tile count constexpr: triton-ascend 3.2.2 may return a tensor
+    # from tl.cdiv even for constexpr inputs, breaking the REUSE branch.
+    TILES: tl.constexpr = (C + BLOCK - 1) // BLOCK
+    REUSE: tl.constexpr = TASKS > GRID and GRID % TILES == 0
     if REUSE:
-        c0 = (tl.program_id(0) % tl.cdiv(C, BLOCK)) * BLOCK
+        c0 = (tl.program_id(0) % TILES) * BLOCK
         w = tl.load(Weight + c0 * K + iw)
         w0 = tl.gather(w, channel * K, 0).to(tl.float32)
         w1 = tl.gather(w, channel * K + 1, 0).to(tl.float32)
@@ -166,8 +169,8 @@ def _packed_conv(
         w3 = tl.gather(w, channel * K + 3, 0).to(tl.float32)
     for task in range(tl.program_id(0), TASKS, GRID):
         # One task covers one batch row and one consecutive group of channels.
-        b = task // tl.cdiv(C, BLOCK)
-        c0 = (task % tl.cdiv(C, BLOCK)) * BLOCK
+        b = task // TILES
+        c0 = (task % TILES) * BLOCK
         ix = tl.arange(0, LOAD)
         x = tl.load(
             X + b * C * T + c0 * T + ix,
