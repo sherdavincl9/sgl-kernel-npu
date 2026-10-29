@@ -121,6 +121,93 @@ class TestTransferKVSparse(unittest.TestCase):
             self.assertTrue(t.all(full[:, 0] == 255))
             self.assertTrue(t.all(full[0] == 255))
 
+    def test_service_sized_bf16_roundtrip_with_cpu_indices(self):
+        """Seven 128-token pages, separate K/V and fewer Indexer layers.
+
+        Check bytes against an independent CPU snapshot, including every
+        device page that should remain untouched. No model is loaded.
+        """
+        t = self.torch
+        ps, device_pages, host_pages = 128, 33, 17
+        source_pages = [32, 1, 29, 4, 23, 7, 19]
+        saved_pages = [1, 8, 15, 3, 12, 5, 16]
+        target_pages = [0, 3, 11, 15, 20, 26, 31]
+        generator = t.Generator(device="cpu").manual_seed(20261029)
+        components = []
+        for name, layers, width in (
+            ("K", 78, 512),
+            ("V", 78, 64),
+            ("Indexer K", 21, 128),
+        ):
+            shape = (layers, device_pages, ps, 1, width)
+            original = t.randint(
+                0, 256, shape, dtype=t.uint8, generator=generator, device="cpu"
+            ).to(t.bfloat16)
+            dev = original.npu()
+            full_host = self.offload.empty(
+                [host_pages, layers + 2, ps, 1, width], dtype=t.bfloat16
+            ).fill_(-77)
+            components.append(
+                (name, dev, full_host[:, 1 : layers + 1], full_host, original)
+            )
+
+        def cpu_indices(pages):
+            return (
+                t.tensor(pages, dtype=t.int64, device="cpu")[:, None] * ps
+                + t.arange(ps, dtype=t.int64, device="cpu")
+            ).flatten()
+
+        source = cpu_indices(source_pages)
+        saved = cpu_indices(saved_pages)
+        target = cpu_indices(target_pages)
+        kwargs = dict(
+            device_k=components[0][1],
+            host_k=components[0][2],
+            device_v=components[1][1],
+            host_v=components[1][2],
+            device_index_k=components[2][1],
+            host_index_k=components[2][2],
+            page_size=ps,
+        )
+        write, load = t.npu.Stream(), t.npu.Stream()
+        ready = t.npu.Event()
+        ready.record()
+        with t.npu.stream(write):
+            write.wait_event(ready)
+            self.transfer(source, saved, direction=self.direction.D2H, **kwargs)
+        with t.npu.stream(load):
+            self.transfer(target, saved, direction=self.direction.H2D, **kwargs)
+        load.synchronize()
+
+        def assert_bytes_equal(actual, expected, label):
+            actual_bytes = actual.contiguous().view(t.uint8)
+            expected_bytes = expected.contiguous().view(t.uint8)
+            self.assertTrue(t.equal(actual_bytes, expected_bytes), label)
+
+        for name, dev, host, full_host, original in components:
+            payload = original[:, source_pages]
+            assert_bytes_equal(
+                host[saved_pages].transpose(0, 1),
+                payload,
+                f"{name}: D2H Host payload differs",
+            )
+            expected = original.clone()
+            expected[:, target_pages] = payload
+            assert_bytes_equal(
+                dev.cpu(), expected, f"{name}: H2D bytes or untouched device pages differ"
+            )
+            # Guard Host layers and all pages outside the submitted set.
+            self.assertTrue(
+                t.all(full_host[:, 0] == -77), f"{name}: first guard layer"
+            )
+            self.assertTrue(
+                t.all(full_host[:, -1] == -77), f"{name}: last guard layer"
+            )
+            untouched = [i for i in range(host_pages) if i not in saved_pages]
+            self.assertTrue(
+                t.all(host[untouched] == -77), f"{name}: untouched Host pages"
+            )
+
     def test_large_bf16_page_and_invalid_page_metadata(self):
         t = self.torch
         ps = 128
