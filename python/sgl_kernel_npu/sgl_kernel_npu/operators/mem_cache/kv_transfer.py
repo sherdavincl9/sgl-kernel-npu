@@ -1,6 +1,5 @@
 """Public split-KV HiCache operators and MemFabric implementation selection."""
 
-from ..utils.generation import Generation
 from ..utils.registry import get_impl_by_name, register_impl, register_operator
 
 _memfabric_fn = None

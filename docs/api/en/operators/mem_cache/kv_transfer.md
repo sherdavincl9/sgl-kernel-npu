@@ -4,11 +4,11 @@
 
 | Implementation | arch22 | arch35 |
 | --- | --- | --- |
-| `aicpu` | Unsupported | Declared; PF/LF refactor needs hardware regression |
-| `aiv` | Unsupported | Declared; PF/LF refactor needs hardware regression |
+| `aicpu` | Unverified; registration enabled | Declared; PF/LF refactor needs hardware regression |
+| `aiv` | Unverified; registration enabled | Declared; PF/LF refactor needs hardware regression |
 | `torch_native` | Unverified | Synchronous correctness reference |
 
-Both MemFabric implementations currently register only for arch35 (A5). Passing the original URMA tests does not establish correctness of this refactor.
+The wrappers do not restrict registration by hardware generation. Actual availability depends on the matching MemFabric backend and runtime. Passing the original URMA tests does not establish correctness of this refactor.
 
 ## Signatures
 
