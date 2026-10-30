@@ -10,32 +10,26 @@ _reference_fn = None
 @register_impl(
     "mem_cache.transfer_kv_per_layer_kv_split_pf_lf",
     "aicpu",
-    supported_generations={Generation.ARCH35},
 )
 @register_impl(
     "mem_cache.transfer_kv_all_layer_kv_split_lf_pf",
     "aicpu",
-    supported_generations={Generation.ARCH35},
 )
 @register_impl(
     "mem_cache.transfer_kv_per_layer_kv_split",
     "aicpu",
-    supported_generations={Generation.ARCH35},
 )
 @register_impl(
     "mem_cache.transfer_kv_all_layer_kv_split",
     "aicpu",
-    supported_generations={Generation.ARCH35},
 )
 @register_impl(
     "mem_cache.transfer_kv_per_layer_kv_split_pf_lf",
     "auto",
-    supported_generations={Generation.ARCH35},
 )
 @register_impl(
     "mem_cache.transfer_kv_per_layer_kv_split",
     "auto",
-    supported_generations={Generation.ARCH35},
 )
 def _aicpu_impl(*args, **kwargs):
     global _memfabric_fn
@@ -49,32 +43,26 @@ def _aicpu_impl(*args, **kwargs):
 @register_impl(
     "mem_cache.transfer_kv_per_layer_kv_split_pf_lf",
     "aiv",
-    supported_generations={Generation.ARCH35},
 )
 @register_impl(
     "mem_cache.transfer_kv_all_layer_kv_split_lf_pf",
     "aiv",
-    supported_generations={Generation.ARCH35},
 )
 @register_impl(
     "mem_cache.transfer_kv_per_layer_kv_split",
     "aiv",
-    supported_generations={Generation.ARCH35},
 )
 @register_impl(
     "mem_cache.transfer_kv_all_layer_kv_split",
     "aiv",
-    supported_generations={Generation.ARCH35},
 )
 @register_impl(
     "mem_cache.transfer_kv_all_layer_kv_split_lf_pf",
     "auto",
-    supported_generations={Generation.ARCH35},
 )
 @register_impl(
     "mem_cache.transfer_kv_all_layer_kv_split",
     "auto",
-    supported_generations={Generation.ARCH35},
 )
 def _aiv_impl(*args, **kwargs):
     global _memfabric_fn
