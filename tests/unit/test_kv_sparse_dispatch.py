@@ -248,7 +248,9 @@ class TestSparseDispatch(unittest.TestCase):
 
     def test_public_defaults_and_explicit_overrides(self):
         implementations = {}
-        def register_impl(name, impl, **_):
+        def register_impl(name, impl, **options):
+            self.assertNotIn("supported_generations", options)
+            self.assertNotIn("excluded_generations", options)
             def register(fn):
                 implementations[name, impl] = fn
                 return fn
@@ -262,8 +264,6 @@ class TestSparseDispatch(unittest.TestCase):
         public = importlib.util.module_from_spec(spec)
         with patch.dict(sys.modules, {
             package: parent,
-            "sgl_kernel_npu.operators.utils.generation": SimpleNamespace(
-                Generation=SimpleNamespace(ARCH35="arch35")),
             "sgl_kernel_npu.operators.utils.registry": SimpleNamespace(
                 register_impl=register_impl,
                 register_operator=lambda _: lambda fn: fn,

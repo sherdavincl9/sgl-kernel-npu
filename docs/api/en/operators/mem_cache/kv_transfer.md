@@ -4,11 +4,11 @@
 
 | Implementation | arch22 | arch35 |
 | --- | --- | --- |
-| `aicpu` | Unsupported | Declared; PF/LF refactor needs hardware regression |
-| `aiv` | Unsupported | Declared; PF/LF refactor needs hardware regression |
+| `aicpu` | Unverified; registration enabled | Declared; PF/LF refactor needs hardware regression |
+| `aiv` | Unverified; registration enabled | Declared; PF/LF refactor needs hardware regression |
 | `torch_native` | Unverified | Synchronous correctness reference |
 
-Both MemFabric implementations currently register only for arch35 (A5). Passing the original URMA tests does not establish correctness of this refactor.
+The wrappers do not restrict registration by hardware generation. Actual availability depends on the matching MemFabric backend and runtime. Passing the original URMA tests does not establish correctness of this refactor.
 
 ## Signatures
 
@@ -141,4 +141,4 @@ python -m pytest tests/python/operators/mem_cache/test_kv_transfer.py --impl aiv
 python -m pytest tests/python/operators/mem_cache/test_kv_transfer.py --impl aicpu --impl-ref torch_native --prof-dir results/kv --csv-path results/kv.csv -v -s
 ```
 
-The test fixture initializes LOCAL for an explicit aiv choice and LOCAL_URMA otherwise. The auto default calls sparse_copy for H2D and kv_exchange_copy for D2H, requiring MF support for both entry points. Only service-sized cases enable performance by default; `--enable-perf` overrides this. Tests isolate in-place destinations, compare exact bytes, and then use `make_executor` / `check_performance`. Add `-m extra_checks` for supplementary pointer-table checks. Shared profiling reports mean summed NPU-task duration, excluding full CPU submission overhead; measure end-to-end overhead separately when comparing the old implementation. An available A5 and matching CANN/Torch/MemFabric are required; verify imports use the current build.
+The test fixture initializes LOCAL for an explicit aiv choice and LOCAL_URMA otherwise. The auto default calls sparse_copy for H2D and kv_exchange_copy for D2H, requiring MF support for both entry points. Only service-sized cases enable performance by default; `--enable-perf` overrides this. Tests isolate in-place destinations, compare exact bytes, and then use `make_executor` / `check_performance`. Add `-m extra_checks` for supplementary pointer-table checks. Shared profiling reports mean summed NPU-task duration, excluding full CPU submission overhead; measure end-to-end overhead separately when comparing the old implementation. An available NPU and matching CANN/Torch/MemFabric are required; verify imports use the current build. The fixture's LOCAL_URMA scene must be supported by the test environment.

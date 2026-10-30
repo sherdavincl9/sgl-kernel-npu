@@ -4,11 +4,11 @@
 
 | 实现 | arch22 | arch35 |
 | --- | --- | --- |
-| `aicpu` | 不支持 | 声明支持，本轮 PF/LF 改动待实机回归 |
-| `aiv` | 不支持 | 声明支持，本轮 PF/LF 改动待实机回归 |
+| `aicpu` | 已开放注册，待实机验证 | 声明支持，本轮 PF/LF 改动待实机回归 |
+| `aiv` | 已开放注册，待实机验证 | 声明支持，本轮 PF/LF 改动待实机回归 |
 | `torch_native` | 未验证 | 同步正确性参考 |
 
-两个 MemFabric 实现当前均仅注册在 arch35（A5）。已有初版 URMA 用例通过不等于本轮重构已经通过实机测试。
+包装层不再按硬件代际限制注册，实际可用性取决于匹配的 MemFabric 后端和运行环境。已有初版 URMA 用例通过不等于本轮重构已经通过实机测试。
 
 ## 签名
 
@@ -141,4 +141,4 @@ python -m pytest tests/python/operators/mem_cache/test_kv_transfer.py --impl aiv
 python -m pytest tests/python/operators/mem_cache/test_kv_transfer.py --impl aicpu --impl-ref torch_native --prof-dir results/kv --csv-path results/kv.csv -v -s
 ```
 
-测试默认按显式实现选择初始化 MF 资源（aiv 使用 LOCAL，其余使用 LOCAL_URMA）；auto 在 H2D 调用 sparse_copy，在 D2H 调用 kv_exchange_copy，需 MF 同时支持两个入口。默认仅服务尺寸用例采性能，可用 `--enable-perf` 覆盖。测试对原地修改目标使用独立缓冲区并逐字节比较，再通过 `make_executor` / `check_performance` 采集。补充地址表检查加 `-m extra_checks`。共享性能工具报告 NPU task 耗时之和的平均值，不包含全部 CPU 提交开销；与旧实现对比端到端开销时应另行计时。执行这些测试需有可用 A5、匹配的 CANN/Torch/MemFabric，且确认导入当前构建。
+测试默认按显式实现选择初始化 MF 资源（aiv 使用 LOCAL，其余使用 LOCAL_URMA）；auto 在 H2D 调用 sparse_copy，在 D2H 调用 kv_exchange_copy，需 MF 同时支持两个入口。默认仅服务尺寸用例采性能，可用 `--enable-perf` 覆盖。测试对原地修改目标使用独立缓冲区并逐字节比较，再通过 `make_executor` / `check_performance` 采集。补充地址表检查加 `-m extra_checks`。共享性能工具报告 NPU task 耗时之和的平均值，不包含全部 CPU 提交开销；与旧实现对比端到端开销时应另行计时。执行这些测试需有可用 NPU、匹配的 CANN/Torch/MemFabric，且确认导入当前构建。测试环境须支持 fixture 使用的 LOCAL_URMA scene。
