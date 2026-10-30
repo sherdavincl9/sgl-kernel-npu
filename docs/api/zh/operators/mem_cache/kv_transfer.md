@@ -1,0 +1,144 @@
+# Split-KV Host/Device 搬运
+
+## 硬件支持
+
+| 实现 | arch22 | arch35 |
+| --- | --- | --- |
+| `aicpu` | 不支持 | 声明支持，本轮 PF/LF 改动待实机回归 |
+| `aiv` | 不支持 | 声明支持，本轮 PF/LF 改动待实机回归 |
+| `torch_native` | 未验证 | 同步正确性参考 |
+
+两个 MemFabric 实现当前均仅注册在 arch35（A5）。已有初版 URMA 用例通过不等于本轮重构已经通过实机测试。
+
+## 签名
+
+公共导入路径：`sgl_kernel_npu.operators.mem_cache`。
+
+```python
+def transfer_kv_per_layer_kv_split_pf_lf(
+    device_indices, host_indices, device_k, host_k, device_v, host_v,
+    device_index_k=None, host_index_k=None,
+    device_index_k_scale=None, host_index_k_scale=None, page_size=128,
+    *, device_layer_id, host_layer_id, device_index_layer_id=None, host_index_layer_id=None,
+    impl="auto",
+) -> None: ...
+
+def transfer_kv_all_layer_kv_split_lf_pf(
+    device_indices, host_indices, device_k, host_k, device_v, host_v,
+    device_index_k=None, host_index_k=None,
+    device_index_k_scale=None, host_index_k_scale=None, page_size=128,
+    *, host_layer_start=0,
+    impl="auto",
+) -> None: ...
+
+def transfer_kv_per_layer_kv_split(
+    device_indices, host_indices, device_k, host_k, device_v, host_v,
+    device_index_k=None, host_index_k=None,
+    device_index_k_scale=None, host_index_k_scale=None, page_size=128,
+    *, device_layer_id, host_layer_id, device_index_layer_id=None, host_index_layer_id=None,
+    impl="auto",
+) -> None: ...
+
+def transfer_kv_all_layer_kv_split(
+    device_indices, host_indices, device_k, host_k, device_v, host_v,
+    device_index_k=None, host_index_k=None,
+    device_index_k_scale=None, host_index_k_scale=None, page_size=128,
+    *, host_layer_start=0,
+    impl="auto",
+) -> None: ...
+
+
+```
+
+`auto` 默认在逐层 H2D 入口选择 `aicpu`，在全层 D2H 入口选择 `aiv`，与 MemFabric scene 无关。显式 `impl` 可选 `aicpu`、`aiv`、`torch_native`；两个生产实现均保留 H2D/D2H 能力。
+
+## 行为
+
+Device 布局始终为 `[layer,page,token,head,dim]`。带 `pf_lf` 的逐层入口做 H2D；带 `lf_pf` 的全层入口做 D2H；两者 Host 均为 PF `[page,layer,token,head,dim]`。不带布局后缀的两个入口使用 LF Host `[layer,page,token,head,dim]`。
+
+逐层入口只搬指定 Device/Host KV 层以及显式指定的 Indexer 槽。两个 Indexer 槽号均为 None 时不搬 Indexer；只提供一端槽号时报错。全层入口把当前 Device 池的所有 KV 层搬到从 `host_layer_start` 开始的 Host 层；Indexer 使用自己独立的完整层空间。
+
+按 indices 的顺序配对 Device/Host 页。每页载荷逐字节复制，不做量化或反量化。目的页应彼此不重叠；输入必须由连续、按页对齐的完整 token 槽位段组成，每段有 `page_size` 项。生产内核读取每段的第一项确定页号，调用者负责段内其余 token 的连续性。
+
+## 参数和返回值
+
+| 参数 | 类型、默认值与约束 |
+| --- | --- |
+| `device_indices` / `host_indices` | 一维 int64 Tensor；CPU 或与 K 相同的 NPU；长度相同且为 page_size 的倍数；值是 token 槽位，不是页号或地址；页必须在各组件容量范围内 |
+| `device_k` / `host_k` | 非空五维 Tensor；Device 为 NPU LF，Host 为 CPU PF/LF；dtype 和每页 `[T,H,D]` 相同 |
+| `device_v` / `host_v` | Tensor 对；非空 Device V 使用相同层选择；空 Device V 表示 packed-K 无独立 V 载荷，Host V 可以保留未使用占位空间 |
+| `device_index_k` / `host_index_k` | 可选 Tensor，默认 None；仅两端同时存在时搬运，保留旧接口行为；独立 Indexer 层数可少于 KV 层数 |
+| `device_index_k_scale` / `host_index_k_scale` | 可选 FP32 scale，默认 None；两端同时存在时原样搬运；Device 支持 `[I,P,T,1]`，Host 为 `[P,I,T,1,1]` 或 `[I,P,T,1,1]` |
+| `page_size` | 正整数，默认 128；须匹配所有参与组件的页 token 维 |
+| `device_layer_id` / `host_layer_id` | 逐层入口必填的非负池内层号，可不相同 |
+| `device_index_layer_id` / `host_index_layer_id` | 逐层入口可选的非负 Indexer 槽号，默认 None；两端必须同时指定或同时省略 |
+| `host_layer_start` | 全层入口的 Host KV 起始层，默认 0；须容纳当前 Device 池的全部层 |
+| `impl` | 关键字参数，默认 auto；见各后端说明 |
+| 返回值 | None；H2D 原地修改 Device，D2H 原地修改 Host |
+
+每个 `(page,layer)` 内的载荷必须连续，允许 Host 层切片形成的跨页间隙。Host 缓冲区须由调用者通过匹配的 MemFabric 分配/注册流程提供。
+
+## aicpu
+
+Triton 在 NPU 上并行构造地址表，再调用 `offload.sparse_copy`。`aicpu` 是此实现的注册名：`LOCAL_URMA` 使用 URMA 路径，`LOCAL` 可由 MF 使用 MTE 路径，并通过 `get_dva` 解析 Host 基址。需要匹配的 MF 地址表协议；当前本地旧版 MTE 内核还有前后半表配对限制，未在本轮重写。当前包装单次最多 8190 条描述，每条长度为正 int32。CPU indices 使用 pinned staging 异步上传。
+
+## aiv
+
+通过 MemFabric `get_dva` 获取 Host 的设备可访问地址，构造紧凑 metadata，然后调用 `offload.kv_exchange_copy`。metadata 携带实际层/页 stride、单页字节数和 PF/LF 遍历模式。需要包含该接口实际实现的匹配 MemFabric 版本。
+
+## torch_native
+
+同步独立参考：直接用原始 Tensor 的层/页索引执行 Torch copy，不复用生产视图选择或地址生成。用于正确性对照，不用于评估搬运性能。
+
+## 流与生命周期
+
+生产实现提交到调用者当前 NPU stream，不创建搬运 stream，也不执行同步。调用者负责生产者依赖及消费完成事件，并在传输结束前禁止改写/复用相关存储。包装保留 Tensor、地址表和 pinned staging，直到事件完成。sparse_copy 包装跨流串行提交，以保护共享资源；AIV 的跨流数据依赖由调用者提供。释放 MemFabric entity 前须同步并结束所有使用该 entity 的传输。
+
+## 示例
+
+```python
+import torch
+import torch_npu
+from memfabric_hybrid import offload
+from sgl_kernel_npu.operators.mem_cache import (
+    transfer_kv_all_layer_kv_split_lf_pf as backup,
+    transfer_kv_per_layer_kv_split_pf_lf as load,
+)
+
+torch.npu.set_device(0)
+config = offload.OffloadConfig()
+config.device_id = 0
+config.reserve_size = config.alloc_size = 1 << 30
+config.flags = 0
+config.scene = offload.Scene.LOCAL_URMA
+assert offload.initialize(config) == 0
+ps = 4
+original = torch.arange(3 * 4 * ps * 8, device="cpu").reshape(3, 4, ps, 1, 8).to(torch.bfloat16)
+dev = original.npu()
+host = offload.empty([6, 5, ps, 1, 8], dtype=torch.bfloat16)
+empty_dev, empty_host = torch.empty(0, device="npu"), torch.empty(0, device="cpu")
+source = torch.arange(ps, 2 * ps, dtype=torch.int64, device="cpu")
+saved = torch.arange(2 * ps, 3 * ps, dtype=torch.int64, device="cpu")
+target = torch.arange(3 * ps, 4 * ps, dtype=torch.int64, device="cpu")
+backup(source, saved, dev, host, empty_dev, empty_host, page_size=ps,
+       host_layer_start=1, impl="aicpu")
+load(target, saved, dev, host, empty_dev, empty_host, page_size=ps,
+     device_layer_id=2, host_layer_id=1, impl="aicpu")
+torch.npu.synchronize()
+assert torch.equal(dev[2, 3].cpu(), original[0, 1])
+del host
+offload.uninitialize()
+
+```
+
+LF Host 可改为 `[5,6,ps,1,8]`，即 `[host_layers,host_pages,ps,1,8]` 分配，并调用无布局后缀的接口。
+
+## 验证
+
+```bash
+python -m pytest tests/python/operators/mem_cache/test_kv_transfer.py --impl aicpu --impl-ref torch_native --enable-perf=false -v -s -rs
+python -m pytest tests/python/operators/mem_cache/test_kv_transfer.py --impl aiv --impl-ref torch_native --enable-perf=false -v -s -rs
+python -m pytest tests/python/operators/mem_cache/test_kv_transfer.py --impl aicpu --impl-ref torch_native --prof-dir results/kv --csv-path results/kv.csv -v -s
+```
+
+测试默认按显式实现选择初始化 MF 资源（aiv 使用 LOCAL，其余使用 LOCAL_URMA）；auto 在 H2D 调用 sparse_copy，在 D2H 调用 kv_exchange_copy，需 MF 同时支持两个入口。默认仅服务尺寸用例采性能，可用 `--enable-perf` 覆盖。测试对原地修改目标使用独立缓冲区并逐字节比较，再通过 `make_executor` / `check_performance` 采集。补充地址表检查加 `-m extra_checks`。共享性能工具报告 NPU task 耗时之和的平均值，不包含全部 CPU 提交开销；与旧实现对比端到端开销时应另行计时。执行这些测试需有可用 A5、匹配的 CANN/Torch/MemFabric，且确认导入当前构建。

@@ -4,11 +4,12 @@ Only the NPU/Memfabric boundary is mocked; no PyTorch/CANN install is needed.
 """
 
 import importlib.util
+from functools import partial
 import sys
 import unittest
 from dataclasses import dataclass
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -56,6 +57,31 @@ class Tensor:
     def unsqueeze(self, dim):
         return Tensor((*self.shape, 1), self.device, self.dtype)
 
+    def element_size(self):
+        return {"bf16": 2, "fp8": 1, "fp32": 4}.get(self.dtype, 8)
+
+    def data_ptr(self):
+        return id(self)
+
+    def stride(self, axis):
+        result = 1
+        for dim in self.shape[axis + 1:]:
+            result *= dim
+        return result
+
+    def transpose(self, a, b):
+        shape = list(self.shape)
+        shape[a], shape[b] = shape[b], shape[a]
+        return Tensor(shape, self.device, self.dtype)
+
+    def __getitem__(self, key):
+        key = key if isinstance(key, tuple) else (key,)
+        shape = list(self.shape)
+        for axis, item in enumerate(key):
+            start, stop, step = item.indices(shape[axis])
+            shape[axis] = len(range(start, stop, step))
+        return self if tuple(shape) == self.shape else Tensor(shape, self.device, self.dtype)
+
 
 class Event:
     def __init__(self):
@@ -81,7 +107,7 @@ class TestSparseDispatch(unittest.TestCase):
     def setUp(self):
         self.stream = SimpleNamespace(wait_event=Mock())
 
-        def build(components, di, hi, page_size, direction):
+        def build(components, di, hi, page_size, direction, *, host_bases=None):
             total = di.numel() // page_size * sum(d.shape[0] for d, _ in components)
             self.tables = [
                 Tensor((total,)),
@@ -95,6 +121,8 @@ class TestSparseDispatch(unittest.TestCase):
         self.torch = SimpleNamespace(
             Tensor=Tensor,
             int64="int64",
+            int32="int32",
+            iinfo=lambda _: SimpleNamespace(max=0x7fffffff),
             npu=SimpleNamespace(
                 device=lambda _: Context(),
                 current_stream=lambda: self.stream,
@@ -103,38 +131,39 @@ class TestSparseDispatch(unittest.TestCase):
         )
         self.offload = SimpleNamespace(
             _get_scene=lambda: 2,
-            Scene=SimpleNamespace(LOCAL_URMA=2),
+            Scene=SimpleNamespace(LOCAL=1, LOCAL_URMA=2),
+            get_dva=Mock(return_value=1 << 44),
             CopyDirection=SimpleNamespace(H2D=1, D2H=2),
             sparse_copy=Mock(return_value=0),
         )
+        language = SimpleNamespace(constexpr=object)
         self.modules = patch.dict(
             sys.modules,
             {
                 "torch": self.torch,
-                "sgl_kernel_npu.implementation.triton.mem_cache.kv_sparse": SimpleNamespace(
-                    build_kv_sparse_metadata=self.builder
-                ),
+                "triton": SimpleNamespace(jit=lambda **_: lambda fn: fn, language=language),
+                "triton.language": language,
                 "memfabric_hybrid": SimpleNamespace(offload=self.offload),
             },
         )
         self.modules.start()
         self.addCleanup(self.modules.stop)
-        path = ROOT / "python/sgl_kernel_npu/sgl_kernel_npu/_kv_sparse.py"
-        spec = importlib.util.spec_from_file_location("_test_kv_sparse", path)
+        module_name = "sgl_kernel_npu.implementation.memfabric.mem_cache.kv_transfer"
+        path = ROOT / "python/sgl_kernel_npu/sgl_kernel_npu/implementation/memfabric/mem_cache/kv_transfer.py"
+        spec = importlib.util.spec_from_file_location(module_name, path)
         self.module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(self.module)
-        self.modules_alias = patch.dict(
-            sys.modules, {"sgl_kernel_npu._kv_sparse": self.module}
-        )
-        self.modules_alias.start()
-        self.addCleanup(self.modules_alias.stop)
+        self.module.build_kv_sparse_metadata = self.builder
+        self.call = partial(self.module.transfer_kv, host_layout="page_first",
+                            kv_layers=(0, 0, None), index_layers=(0, 0, None),
+                            backend="aicpu", direction=1)
 
     def transfer(self, layers=3, pages=2, direction=1, cpu_indices=False):
         dev = Tensor((layers, pages + 3, 4, 1, 5), dtype="bf16")
         host = Tensor((pages + 5, layers, 4, 1, 5), CPU, "bf16")
         di = Tensor((pages * 4,), CPU if cpu_indices else NPU)
         hi = Tensor((pages * 4,), CPU if cpu_indices else NPU)
-        self.module.transfer_kv_sparse_copy(
+        self.call(
             di,
             hi,
             dev,
@@ -159,19 +188,19 @@ class TestSparseDispatch(unittest.TestCase):
 
     def test_cross_stream_dependency_covers_both_directions(self):
         self.transfer()
-        first = self.module._last_event[NPU]
+        first = self.module._last_sparse_event[NPU]
         second_stream = SimpleNamespace(wait_event=Mock())
         self.stream = second_stream
         self.transfer(direction=2)
         second_stream.wait_event.assert_called_once_with(first)
         self.assertEqual(self.offload.sparse_copy.call_args.args[-1], 2)
-        self.assertIs(self.module._last_event[NPU].stream, second_stream)
+        self.assertIs(self.module._last_sparse_event[NPU].stream, second_stream)
 
     def test_submission_failure_keeps_metadata_and_orders_next_call(self):
         self.offload.sparse_copy.return_value = 7
         with self.assertRaisesRegex(RuntimeError, "code=7"):
             self.transfer()
-        failed = self.module._last_event[NPU]
+        failed = self.module._last_sparse_event[NPU]
         self.assertTrue(self.module._inflight)
         self.offload.sparse_copy.return_value = 0
         self.transfer()
@@ -192,7 +221,7 @@ class TestSparseDispatch(unittest.TestCase):
             self.transfer()
         self.builder.assert_not_called()
         with self.assertRaisesRegex(ValueError, "complete pages"):
-            self.module.transfer_kv_sparse_copy(
+            self.call(
                 Tensor((3,)),
                 Tensor((3,)),
                 Tensor((1, 2, 4, 1, 5)),
@@ -203,19 +232,58 @@ class TestSparseDispatch(unittest.TestCase):
             )
         self.offload.sparse_copy.assert_not_called()
 
+    def test_local_sparse_copy_resolves_host_dva_without_changing_impl(self):
+        self.offload._get_scene = lambda: 1
+        self.transfer(direction=2)
+        self.offload.sparse_copy.assert_called_once()
+        self.assertEqual(self.builder.call_args.kwargs["host_bases"], [1 << 44])
+
     def test_empty_transfer_has_no_backend_side_effect(self):
         self.transfer(pages=0)
         self.builder.assert_not_called()
         self.offload.sparse_copy.assert_not_called()
 
     def public_wrapper(self):
-        spec = importlib.util.spec_from_file_location(
-            "_test_public_kvcacheio",
-            ROOT / "python/sgl_kernel_npu/sgl_kernel_npu/kvcacheio.py",
-        )
+        return self.call
+
+    def test_public_defaults_and_explicit_overrides(self):
+        implementations = {}
+        def register_impl(name, impl, **_):
+            def register(fn):
+                implementations[name, impl] = fn
+                return fn
+            return register
+        package = "sgl_kernel_npu.operators.mem_cache"
+        parent = ModuleType(package)
+        parent.__path__ = []
+        name = package + ".kv_transfer"
+        path = ROOT / "python/sgl_kernel_npu/sgl_kernel_npu/operators/mem_cache/kv_transfer.py"
+        spec = importlib.util.spec_from_file_location(name, path)
         public = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(public)
-        return public.transfer_kv_sparse_copy
+        with patch.dict(sys.modules, {
+            package: parent,
+            "sgl_kernel_npu.operators.utils.generation": SimpleNamespace(
+                Generation=SimpleNamespace(ARCH35="arch35")),
+            "sgl_kernel_npu.operators.utils.registry": SimpleNamespace(
+                register_impl=register_impl,
+                register_operator=lambda _: lambda fn: fn,
+                get_impl_by_name=lambda name, impl: implementations[name, impl]),
+        }):
+            spec.loader.exec_module(public)
+        public._memfabric_fn = Mock()
+        args = ("di", "hi", "dk", "hk", "dv", "hv")
+        for suffix in ("_pf_lf", ""):
+            fn = getattr(public, "transfer_kv_per_layer_kv_split" + suffix)
+            for impl, expected in (("auto", "aicpu"), ("aiv", "aiv"), ("aicpu", "aicpu")):
+                fn(*args, device_layer_id=2, host_layer_id=4, impl=impl)
+                kw = public._memfabric_fn.call_args.kwargs
+                self.assertEqual((kw["backend"], kw["direction"]), (expected, 1))
+        for suffix in ("_lf_pf", ""):
+            fn = getattr(public, "transfer_kv_all_layer_kv_split" + suffix)
+            for impl, expected in (("auto", "aiv"), ("aicpu", "aicpu"), ("aiv", "aiv")):
+                fn(*args, impl=impl)
+                kw = public._memfabric_fn.call_args.kwargs
+                self.assertEqual((kw["backend"], kw["direction"]), (expected, 2))
 
     def test_public_wrapper_rejects_invalid_required_or_empty_buffers(self):
         call = self.public_wrapper()

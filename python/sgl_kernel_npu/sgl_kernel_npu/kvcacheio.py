@@ -3,8 +3,6 @@ from typing import Optional, Sequence
 
 import torch
 
-from sgl_kernel_npu._kv_sparse import transfer_kv_sparse_copy as transfer_kv_sparse_copy
-
 
 class TransferDirection(Enum):
     H2D = 1

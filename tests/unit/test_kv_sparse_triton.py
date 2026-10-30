@@ -1,7 +1,7 @@
 """CPU execution of the actual Triton kernel body through a NumPy TL facade.
 
 This checks vector address arithmetic and masks, not Triton compilation, cache
-visibility, or the A5 runtime. Real NPU coverage is in test_transfer_kv_sparse.
+visibility, or the A5 runtime. Real NPU coverage is in tests/python/operators/mem_cache/test_kv_transfer.py.
 """
 
 import importlib.util
@@ -167,9 +167,9 @@ class TestTritonKVMetadata(unittest.TestCase):
         ):
             path = (
                 ROOT
-                / "python/sgl_kernel_npu/sgl_kernel_npu/implementation/triton/mem_cache/kv_sparse.py"
+                / "python/sgl_kernel_npu/sgl_kernel_npu/implementation/memfabric/mem_cache/kv_transfer.py"
             )
-            spec = importlib.util.spec_from_file_location("_cpu_triton_kv_sparse", path)
+            spec = importlib.util.spec_from_file_location("_cpu_kv_transfer", path)
             self.module = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(self.module)
 
@@ -287,6 +287,17 @@ class TestTritonKVMetadata(unittest.TestCase):
             tuple(zip(devices, hosts)), di, self.indices([1], 4), 4, 2
         )
         self.assertEqual(lengths.array.tolist(), [-1] * 3)
+
+    def test_host_dva_base_override_preserves_layer_and_page_offsets(self):
+        devices, hosts = self.components(layers=(3,), widths=(1,), dtypes=(np.uint8,))
+        delta = 1 << 40
+        _, dst, _, _ = self.module.build_kv_sparse_metadata(
+            tuple(zip(devices, hosts)), self.indices([6, 2], 4),
+            self.indices([1, 8], 4), 4, 2,
+            host_bases=[hosts[0].base + delta],
+        )
+        expected = [row[1] + delta for row in self.expected(devices, hosts, [6, 2], [1, 8])]
+        self.assertEqual(dst.array.tolist(), expected)
 
     def test_validation_rejects_bad_layout_and_length_overflow(self):
         devices, hosts = self.components(layers=(3,), widths=(1,), dtypes=(np.uint8,))
