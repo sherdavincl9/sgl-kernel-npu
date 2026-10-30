@@ -1,6 +1,6 @@
 """Split-KV public API: exact D2H/all-layer and H2D/per-layer copies.
 
-Run on A5 with a matching MemFabric installation. LOCAL_URMA is used by
+Run on NPU with a matching MemFabric installation. LOCAL_URMA is used by
 --impl=auto/aicpu; --impl=aiv initializes LOCAL. The caller supplies registered
 Host storage. Production dimensions below are borrowed from GLM-5.2, rather
 than asserted to be a captured service call.
@@ -36,10 +36,6 @@ perf_shape = [(78, 21, 128, 512, 64, 128)]
 @pytest.fixture(scope="module")
 def offload_runtime(request):
     from memfabric_hybrid import offload
-    from sgl_kernel_npu.operators.utils.generation import Generation, get_hardware
-
-    if get_hardware().generation != Generation.ARCH35:
-        pytest.skip("MemFabric KV implementations are currently validated on A5")
     config = offload.OffloadConfig()
     config.device_id = torch.npu.current_device()
     config.reserve_size = config.alloc_size = 1 << 30

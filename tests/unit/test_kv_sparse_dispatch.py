@@ -107,7 +107,7 @@ class TestSparseDispatch(unittest.TestCase):
     def setUp(self):
         self.stream = SimpleNamespace(wait_event=Mock())
 
-        def build(components, di, hi, page_size, direction, *, host_bases=None):
+        def build(components, di, hi, page_size, direction):
             total = di.numel() // page_size * sum(d.shape[0] for d, _ in components)
             self.tables = [
                 Tensor((total,)),
@@ -232,11 +232,19 @@ class TestSparseDispatch(unittest.TestCase):
             )
         self.offload.sparse_copy.assert_not_called()
 
-    def test_local_sparse_copy_resolves_host_dva_without_changing_impl(self):
-        self.offload._get_scene = lambda: 1
-        self.transfer(direction=2)
-        self.offload.sparse_copy.assert_called_once()
-        self.assertEqual(self.builder.call_args.kwargs["host_bases"], [1 << 44])
+    def test_sparse_copy_keeps_host_pointers_in_both_scenes_and_directions(self):
+        self.offload.get_dva.side_effect = AssertionError(
+            "sparse_copy must not translate Host pool pointers"
+        )
+        for scene in (1, 2):
+            self.offload._get_scene = lambda: scene
+            for direction in (1, 2):
+                self.offload.sparse_copy.reset_mock()
+                _, host, _, _ = self.transfer(direction=direction)
+                self.offload.sparse_copy.assert_called_once()
+                self.assertIs(self.builder.call_args.args[0][0][1], host)
+                self.assertEqual(self.builder.call_args.kwargs, {})
+                self.offload.get_dva.assert_not_called()
 
     def test_empty_transfer_has_no_backend_side_effect(self):
         self.transfer(pages=0)

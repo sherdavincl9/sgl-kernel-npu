@@ -288,16 +288,19 @@ class TestTritonKVMetadata(unittest.TestCase):
         )
         self.assertEqual(lengths.array.tolist(), [-1] * 3)
 
-    def test_host_dva_base_override_preserves_layer_and_page_offsets(self):
+    def test_host_pool_pointer_preserves_layer_and_page_offsets(self):
         devices, hosts = self.components(layers=(3,), widths=(1,), dtypes=(np.uint8,))
-        delta = 1 << 40
-        _, dst, _, _ = self.module.build_kv_sparse_metadata(
-            tuple(zip(devices, hosts)), self.indices([6, 2], 4),
-            self.indices([1, 8], 4), 4, 2,
-            host_bases=[hosts[0].base + delta],
-        )
-        expected = [row[1] + delta for row in self.expected(devices, hosts, [6, 2], [1, 8])]
-        self.assertEqual(dst.array.tolist(), expected)
+        expected = [row[1] for row in self.expected(devices, hosts, [6, 2], [1, 8])]
+        for direction in (1, 2):
+            src, dst, _, _ = self.module.build_kv_sparse_metadata(
+                tuple(zip(devices, hosts)),
+                self.indices([6, 2], 4),
+                self.indices([1, 8], 4),
+                4,
+                direction,
+            )
+            host_table = src if direction == 1 else dst
+            self.assertEqual(host_table.array.tolist(), expected)
 
     def test_validation_rejects_bad_layout_and_length_overflow(self):
         devices, hosts = self.components(layers=(3,), widths=(1,), dtypes=(np.uint8,))

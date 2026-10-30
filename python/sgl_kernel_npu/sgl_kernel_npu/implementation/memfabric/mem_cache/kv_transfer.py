@@ -118,7 +118,7 @@ def _build_kv_sparse_metadata_kernel(
 
 
 def build_kv_sparse_metadata(
-    components, device_indices, host_indices, page_size, direction, *, host_bases=None
+    components, device_indices, host_indices, page_size, direction
 ):
     """Build address tables and one count for a single sparse_copy call.
 
@@ -140,7 +140,7 @@ def build_kv_sparse_metadata(
     lengths = torch.empty((total,), dtype=_LENGTH_DTYPE, device=device)
     count = torch.empty((1,), dtype=torch.int32, device=device)
     component_offset = 0
-    for component_id, (dev, host) in enumerate(components):
+    for dev, host in components:
         entries = pages * dev.shape[0]
         if entries:
             item_size = dev.element_size()
@@ -152,7 +152,7 @@ def build_kv_sparse_metadata(
                 lengths,
                 count,
                 dev.data_ptr(),
-                host.data_ptr() if host_bases is None else host_bases[component_id],
+                host.data_ptr(),
                 component_offset,
                 entries,
                 total,
@@ -257,15 +257,10 @@ def _submit_aicpu(offload, components, di, hi, page_size, direction, device, kee
         raise RuntimeError(
             "sparse_copy requires initialized MemFabric LOCAL or LOCAL_URMA"
         )
-    host_bases = None
-    if scene == offload.Scene.LOCAL:
-        host_bases = [offload.get_dva(host.data_ptr()) for _, host in components]
-        if not all(host_bases):
-            raise ValueError(
-                "LOCAL sparse_copy requires device-accessible Host allocations"
-            )
+    # Preserve sparse_copy's existing address contract: pass the Host pool
+    # pointers through unchanged, as in transfer_kv_sparse_copy.
     src, dst, lengths, count = build_kv_sparse_metadata(
-        components, di, hi, page_size, direction, host_bases=host_bases
+        components, di, hi, page_size, direction
     )
     keepalive.extend((src, dst, lengths, count))
     copy_direction = (
