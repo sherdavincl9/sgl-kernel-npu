@@ -281,42 +281,26 @@ def _submit_aiv(
 ):
     # Host tensors have PF-shaped metadata views even when their storage is LF.
     # Actual page/layer strides preserve the original physical layout.
-    vals = [
-        len(components),
-        hi.numel() // page_size,
+    # The C++ kv_exchange adapter builds the device-resident meta (the same
+    # component/pitch/width/layer contract as the aicpu build_kv_sparse_
+    # metadata path) and launches the AIV kernel; it returns the pinned
+    # staging tensor that carried the meta upload, which stays alive until
+    # the completion event retires the keepalive list.
+    host_dvas = [offload.get_dva(host.data_ptr()) for _, host in components]
+    if not all(host_dvas):
+        raise ValueError("kv_exchange requires device-accessible Host allocations")
+    staging = torch.ops.npu.kv_exchange(
+        di,
+        hi,
+        [dev for dev, _ in components],
+        [host for _, host in components],
+        host_dvas,
         page_size,
         direction,
-        di.data_ptr(),
-        hi.data_ptr(),
         int(host_layout == "layer_first"),
-        0,
-    ]
-    for dev, host in components:
-        host_dva = offload.get_dva(host.data_ptr())
-        if not host_dva:
-            raise ValueError(
-                "kv_exchange_copy requires a device-accessible Host allocation"
-            )
-        item_size = dev.element_size()
-        vals.extend(
-            (
-                dev.data_ptr(),
-                host_dva,
-                dev.stride(0) * item_size,
-                dev.stride(1) * item_size,
-                host.stride(0) * item_size,
-                host.stride(1) * item_size,
-                page_size * dev.shape[3] * dev.shape[4] * item_size,
-                0,
-                dev.shape[0],
-            )
-        )
-    pinned_meta = torch.tensor(vals, dtype=torch.int64, device="cpu", pin_memory=True)
-    meta = pinned_meta.to(device, non_blocking=True)
-    keepalive.extend((pinned_meta, meta))
-    ret = offload.kv_exchange_copy(meta, device)
-    if ret != 0:
-        raise RuntimeError(f"MemFabric kv_exchange_copy failed: code={ret}")
+    )
+    if staging is not None:
+        keepalive.append(staging)
 
 
 def transfer_kv(
