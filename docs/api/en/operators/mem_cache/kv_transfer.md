@@ -84,7 +84,7 @@ Triton constructs pointer tables in parallel on the NPU, followed by `offload.sp
 
 ## aiv
 
-Uses MemFabric `get_dva` to resolve device-accessible Host addresses, builds compact metadata, and calls `offload.kv_exchange_copy`. Metadata includes actual layer/page strides, full-page byte width, and PF/LF traversal mode. Requires a matching MemFabric build implementing this API.
+Uses MemFabric `get_dva` to resolve device-accessible Host addresses and submits through the in-tree `kv_exchange` CANN operator (`torch.ops.npu.kv_exchange`): the C++ adapter builds the device-resident 44-slot metadata -- actual layer/page strides, full-page byte width, PF/LF traversal mode and per-component layer ranges, mirroring the aicpu `build_kv_sparse_metadata` contract -- and launches the AIV kernel on the caller's stream. The pinned staging that carries the metadata upload is returned to the wrapper and retained until the completion event.
 
 ## torch_native
 
@@ -141,4 +141,4 @@ python -m pytest tests/python/operators/mem_cache/test_kv_transfer.py --impl aiv
 python -m pytest tests/python/operators/mem_cache/test_kv_transfer.py --impl aicpu --impl-ref torch_native --prof-dir results/kv --csv-path results/kv.csv -v -s
 ```
 
-The test fixture initializes LOCAL for an explicit aiv choice and LOCAL_URMA otherwise. The auto default calls sparse_copy for H2D and kv_exchange_copy for D2H, requiring MF support for both entry points. Only service-sized cases enable performance by default; `--enable-perf` overrides this. Tests isolate in-place destinations, compare exact bytes, and then use `make_executor` / `check_performance`. Add `-m extra_checks` for supplementary pointer-table checks. Shared profiling reports mean summed NPU-task duration, excluding full CPU submission overhead; measure end-to-end overhead separately when comparing the old implementation. An available NPU and matching CANN/Torch/MemFabric are required; verify imports use the current build. The fixture's LOCAL_URMA scene must be supported by the test environment.
+The test fixture initializes LOCAL for an explicit aiv choice and LOCAL_URMA otherwise. The auto default calls sparse_copy for H2D and the kv_exchange AIV kernel for D2H, requiring MF support plus a build containing the in-tree `kv_exchange` operator. Only service-sized cases enable performance by default; `--enable-perf` overrides this. Tests isolate in-place destinations, compare exact bytes, and then use `make_executor` / `check_performance`. Add `-m extra_checks` for supplementary pointer-table checks. Shared profiling reports mean summed NPU-task duration, excluding full CPU submission overhead; measure end-to-end overhead separately when comparing the old implementation. An available A5 and matching CANN/Torch/MemFabric are required; verify imports use the current build.

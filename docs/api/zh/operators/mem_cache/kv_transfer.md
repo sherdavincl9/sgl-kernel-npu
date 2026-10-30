@@ -84,7 +84,7 @@ Triton 在 NPU 上并行构造地址表，再调用 `offload.sparse_copy`。`aic
 
 ## aiv
 
-通过 MemFabric `get_dva` 获取 Host 的设备可访问地址，构造紧凑 metadata，然后调用 `offload.kv_exchange_copy`。metadata 携带实际层/页 stride、单页字节数和 PF/LF 遍历模式。需要包含该接口实际实现的匹配 MemFabric 版本。
+通过 MemFabric `get_dva` 获取 Host 的设备可访问地址，然后经仓内 `kv_exchange` CANN 算子（`torch.ops.npu.kv_exchange`）提交：C++ adapter 构造驻留设备的 44 槽 metadata（实际层/页 stride、单页字节数、PF/LF 遍历模式和每组件层区间，对齐 aicpu `build_kv_sparse_metadata` 的契约）并在调用方流上启动 AIV kernel。承载 metadata 上传的 pinned staging 会返回给 wrapper，由完成事件保活。
 
 ## torch_native
 
@@ -141,4 +141,4 @@ python -m pytest tests/python/operators/mem_cache/test_kv_transfer.py --impl aiv
 python -m pytest tests/python/operators/mem_cache/test_kv_transfer.py --impl aicpu --impl-ref torch_native --prof-dir results/kv --csv-path results/kv.csv -v -s
 ```
 
-测试默认按显式实现选择初始化 MF 资源（aiv 使用 LOCAL，其余使用 LOCAL_URMA）；auto 在 H2D 调用 sparse_copy，在 D2H 调用 kv_exchange_copy，需 MF 同时支持两个入口。默认仅服务尺寸用例采性能，可用 `--enable-perf` 覆盖。测试对原地修改目标使用独立缓冲区并逐字节比较，再通过 `make_executor` / `check_performance` 采集。补充地址表检查加 `-m extra_checks`。共享性能工具报告 NPU task 耗时之和的平均值，不包含全部 CPU 提交开销；与旧实现对比端到端开销时应另行计时。执行这些测试需有可用 NPU、匹配的 CANN/Torch/MemFabric，且确认导入当前构建。测试环境须支持 fixture 使用的 LOCAL_URMA scene。
+测试默认按显式实现选择初始化 MF 资源（aiv 使用 LOCAL，其余使用 LOCAL_URMA）；auto 在 H2D 调用 sparse_copy，在 D2H 调用 kv_exchange AIV kernel，需 MF 支持且构建中包含仓内 `kv_exchange` 算子。默认仅服务尺寸用例采性能，可用 `--enable-perf` 覆盖。测试对原地修改目标使用独立缓冲区并逐字节比较，再通过 `make_executor` / `check_performance` 采集。补充地址表检查加 `-m extra_checks`。共享性能工具报告 NPU task 耗时之和的平均值，不包含全部 CPU 提交开销；与旧实现对比端到端开销时应另行计时。执行这些测试需有可用 A5、匹配的 CANN/Torch/MemFabric，且确认导入当前构建。
