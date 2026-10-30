@@ -6,6 +6,7 @@ Only the NPU/Memfabric boundary is mocked; no PyTorch/CANN install is needed.
 import importlib.util
 from functools import partial
 import sys
+import types
 import unittest
 from dataclasses import dataclass
 from pathlib import Path
@@ -139,6 +140,14 @@ class TestSparseDispatch(unittest.TestCase):
             sparse_copy=Mock(return_value=0),
         )
         language = SimpleNamespace(constexpr=object)
+        # The aiv backend resolves host DVAs through the kernel-repo
+        # host_memory registration table (same contract as the mf_aiv
+        # branch); inject it so the lazily-imported lookup succeeds.
+        self.host_resolve = Mock(return_value=1 << 44)
+        host_memory_module = types.ModuleType("sgl_kernel_npu.host_memory")
+        host_memory_module.resolve_host_dva = self.host_resolve
+        kernel_package = types.ModuleType("sgl_kernel_npu")
+        kernel_package.__path__ = []
         self.modules = patch.dict(
             sys.modules,
             {
@@ -146,6 +155,8 @@ class TestSparseDispatch(unittest.TestCase):
                 "triton": SimpleNamespace(jit=lambda **_: lambda fn: fn, language=language),
                 "triton.language": language,
                 "memfabric_hybrid": SimpleNamespace(offload=self.offload),
+                "sgl_kernel_npu": kernel_package,
+                "sgl_kernel_npu.host_memory": host_memory_module,
             },
         )
         self.modules.start()
@@ -281,8 +292,12 @@ class TestSparseDispatch(unittest.TestCase):
         self.assertEqual(args[6:], (2, 1))
 
     def test_aiv_requires_device_accessible_host_allocation(self):
-        self.offload.get_dva = Mock(return_value=0)
-        with self.assertRaisesRegex(ValueError, "device-accessible"):
+        # Unregistered MF host memory fails in host_memory.resolve_host_dva
+        # with no HVA/get_dva fallback (mf_aiv contract).
+        self.host_resolve.side_effect = RuntimeError(
+            "MF host memory is not registered"
+        )
+        with self.assertRaisesRegex(RuntimeError, "not registered"):
             self.transfer_aiv()
         self.kv_exchange.assert_not_called()
 

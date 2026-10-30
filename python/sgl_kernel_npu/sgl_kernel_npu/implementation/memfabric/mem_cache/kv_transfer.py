@@ -276,6 +276,16 @@ def _submit_aicpu(offload, components, di, hi, page_size, direction, device, kee
         raise RuntimeError(f"MemFabric sparse_copy failed: code={ret}")
 
 
+def _resolve_host_dva(host):
+    # Mirrors the mf_aiv host_memory contract, device-validated there: the
+    # registration table (host_register + host_get_device_pointer at
+    # allocation time, interior views by byte offset) is the ONLY DVA source;
+    # unregistered MF memory is an error with no HVA/get_dva fallback.
+    from sgl_kernel_npu.host_memory import resolve_host_dva
+
+    return resolve_host_dva(host)
+
+
 def _submit_aiv(
     offload, components, di, hi, page_size, direction, device, host_layout, keepalive
 ):
@@ -286,9 +296,7 @@ def _submit_aiv(
     # metadata path) and launches the AIV kernel; it returns the pinned
     # staging tensor that carried the meta upload, which stays alive until
     # the completion event retires the keepalive list.
-    host_dvas = [offload.get_dva(host.data_ptr()) for _, host in components]
-    if not all(host_dvas):
-        raise ValueError("kv_exchange requires device-accessible Host allocations")
+    host_dvas = [_resolve_host_dva(host) for _, host in components]
     staging = torch.ops.npu.kv_exchange(
         di,
         hi,
