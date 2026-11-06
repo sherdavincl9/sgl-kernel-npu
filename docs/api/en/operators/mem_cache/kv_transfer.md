@@ -5,6 +5,7 @@
 | Implementation | arch22 | arch35 |
 | --- | --- | --- |
 | `aiv` | Unverified; registration enabled | Declared; PF/LF refactor needs hardware regression |
+| `aicpu` | Unverified | Unverified |
 | `torch_native` | Unverified | Synchronous correctness reference |
 
 The wrappers do not restrict registration by hardware generation. Actual availability depends on the matching MemFabric backend and runtime. Passing the original URMA tests does not establish correctness of this refactor.
@@ -49,7 +50,7 @@ def transfer_kv_all_layer_kv_split(
 
 ```
 
-`auto` selects `aiv` for all four APIs, for both per-layer H2D and all-layer D2H. Explicit choices are `aiv` and `torch_native`.
+`auto` selects `aiv` for all four APIs, for both per-layer H2D and all-layer D2H. Explicit choices are `aiv`, `aicpu` and `torch_native`.
 
 ## Description
 
@@ -83,17 +84,49 @@ Resolves registered Host device addresses through `host_memory.resolve_host_dva`
 
 The AIV path requires MF `host_register` / `host_get_device_pointer` support. Initialize `Scene.LOCAL` with `OFFLOAD_FLAG_HOST_MEM`, allocate Host buffers with `offload.empty`, and call `host_memory.register_host_memory` once per full allocation before passing its views to the transfer APIs.
 
+## aicpu
+
+The four APIs accept explicit impl="aicpu" in wheels containing
+kv_sparse_metadata. Build through the existing upstream AICPU framework:
+
+    python setup.py --arch-version 2201 --ops kv_sparse_metadata --artifact wheel
+
+The default --ops all also discovers this operator. Follow the upstream
+[AICPU build prerequisites](../../../../../python/sgl_kernel_npu/README.md#building-and-installing-aicpu-operators).
+
+One AICPU task reads the live NPU page-start indices and generates
+src/dst (int64 address bits), lengths/count (int32), ordered component,
+page, layer. The compact component description is an ACLNN int-array
+attribute; no separate metadata tensor allocation, pinned staging or
+metadata tensor H2D copy is added. CANN still serializes and delivers task
+parameters. No Triton or AIV metadata task is used.
+
+Python then calls MF's unchanged sparse_copy on the same stream. Host
+addresses must be MF-pool HVAs; ACL-only buffers and AIV DVAs are unsupported.
+Retain inputs and tables until MF completes. Batches above 65536 records
+are rejected before launch. Invalid, unaligned or out-of-capacity page
+starts produce safe pool-base addresses and length -1 for MF validation.
+Graph capture is unsupported.
+
+The AICPU builder's address checks can be run without an MF entity:
+
+    python -m pytest tests/python/operators/mem_cache/test_kv_sparse_metadata_aicpu.py -v
+
+Those checks do not copy KV payloads. End-to-end validation requires matching
+MF AICPU resources and MF Host allocations. No compilation, accuracy results
+or performance measurements have been established for this backend yet.
+
 ## torch_native
 
 An independent synchronous reference directly copies original Tensor layer/page slices. It does not reuse production view selection or address generation. Use for correctness comparison, not transfer-performance evaluation.
 
 ## Streams and lifetimes
 
-Production implementations enqueue on the caller's current NPU stream without creating a transfer stream or synchronizing. The caller provides producer dependencies and consumer completion events, and prevents storage mutation/reuse until completion. The wrapper retains original inputs and pinned metadata staging until completion events retire. New contiguous index copies are allocated and consumed on the submission stream, so their storage lifetime relies on allocator ordering. Callers provide cross-stream data dependencies. Synchronize all transfers and end their use before releasing the MemFabric entity.
+Production implementations enqueue on the caller's current NPU stream without creating a transfer stream or synchronizing. The caller provides producer dependencies and consumer completion events, and prevents storage mutation/reuse until completion. The wrapper retains inputs and backend metadata until completion events retire: pinned staging for AIV, and address tables for AICPU. New contiguous index copies are allocated and consumed on the submission stream, so their storage lifetime relies on allocator ordering. Callers provide cross-stream data dependencies. Synchronize all transfers and end their use before releasing the MemFabric entity.
 
 ## NPU graph capture
 
-The AIV transfer path does not support NPU graph capture.
+The AIV and AICPU transfer paths do not support NPU graph capture.
 
 ## Example
 

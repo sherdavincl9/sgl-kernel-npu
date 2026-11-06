@@ -6,6 +6,19 @@ _memfabric_fn = None
 _reference_fn = None
 
 
+@register_impl("mem_cache.transfer_kv_per_layer_kv_split_pf_lf", "aicpu")
+@register_impl("mem_cache.transfer_kv_all_layer_kv_split_lf_pf", "aicpu")
+@register_impl("mem_cache.transfer_kv_per_layer_kv_split", "aicpu")
+@register_impl("mem_cache.transfer_kv_all_layer_kv_split", "aicpu")
+def _aicpu_impl(*args, **kwargs):
+    global _memfabric_fn
+    if _memfabric_fn is None:
+        from ...implementation.memfabric.mem_cache.kv_transfer import transfer_kv
+
+        _memfabric_fn = transfer_kv
+    return _memfabric_fn(*args, backend="aicpu", **kwargs)
+
+
 @register_impl(
     "mem_cache.transfer_kv_per_layer_kv_split_pf_lf",
     "aiv",

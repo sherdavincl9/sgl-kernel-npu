@@ -1,10 +1,11 @@
 """MemFabric KV transfers on the caller's current NPU stream.
 
 The caller owns initialized MemFabric resources and Host storage.
-Inputs and pinned metadata staging stay alive until their completion event.
-NPU graph capture is not supported by this AIV path.
+Inputs and metadata stay alive until their completion event.
+NPU graph capture is not supported.
 """
 
+import os
 from collections import deque
 from threading import Lock
 
@@ -12,6 +13,7 @@ import torch
 
 _submit_lock = Lock()
 _inflight = deque()
+_last_sparse_submission = {}
 
 
 def _check_component(device, host, page_size, index_device):
@@ -117,6 +119,30 @@ def _resolve_host_dva(host):
     return resolve_host_dva(host)
 
 
+def _submit_aicpu(components, di, hi, page_size, direction, device, keepalive):
+    if os.environ.get("SGLANG_HICACHE_HOST_MEM_BACKEND", "").lower() == "acl":
+        raise ValueError(
+            "impl='aicpu' requires MF host-pool memory, not ACL host registration"
+        )
+    build = getattr(torch.ops.npu, "kv_sparse_metadata_aicpu", None)
+    if build is None:
+        raise RuntimeError("Rebuild sgl-kernel-npu with --ops kv_sparse_metadata")
+    from memfabric_hybrid import offload
+
+    src, dst, lengths, count = build(
+        di,
+        hi,
+        [dev for dev, _ in components],
+        [host for _, host in components],
+        page_size,
+        direction,
+    )
+    keepalive.extend((src, dst, lengths, count))
+    ret = offload.sparse_copy(src, dst, lengths, count, device)
+    if ret != 0:
+        raise RuntimeError(f"MF sparse_copy failed: code={ret}")
+
+
 def _submit_aiv(
     offload, components, di, hi, page_size, direction, device, host_layout, keepalive
 ):
@@ -158,6 +184,7 @@ def transfer_kv(
     direction,
     kv_layers,
     index_layers,
+    backend="aiv",
 ):
     """Submit one selected pool/range without synchronizing the caller's stream."""
     if page_size <= 0 or device_indices.ndim != 1 or host_indices.ndim != 1:
@@ -169,8 +196,8 @@ def transfer_kv(
         or device_indices.numel() % page_size
     ):
         raise ValueError("indices must describe equal numbers of complete pages")
-    if direction not in (1, 2):
-        raise ValueError("expected H2D (1) or D2H (2)")
+    if direction not in (1, 2) or backend not in ("aiv", "aicpu"):
+        raise ValueError("expected H2D (1) or D2H (2), and aiv or aicpu")
     components = select_components(
         device_k,
         host_k,
@@ -193,15 +220,19 @@ def transfer_kv(
         _check_component(dev, host, page_size, device)
     if not device_indices.numel():
         return
-    # Host addresses resolve through the registered DVA table (MF or aclrt).
+    # AIV resolves registered Host DVAs; AICPU passes the original MF HVAs.
     offload = None
 
     with _submit_lock, torch.npu.device(device):
         if torch.npu.is_current_stream_capturing():
-            raise RuntimeError("AIV KV transfer does not support NPU graph capture")
+            raise RuntimeError("KV transfer currently supports eager execution only")
         while _inflight and _inflight[0][0].query():
             _inflight.popleft()
         stream = torch.npu.current_stream()
+        if backend == "aicpu":
+            previous = _last_sparse_submission.get(device)
+            if previous is not None and stream != previous[0]:
+                stream.wait_event(previous[1])
         keepalive = [tensor for pair in components for tensor in pair]
         keepalive.extend((device_indices, host_indices))
         try:
@@ -209,9 +240,16 @@ def transfer_kv(
             hi = host_indices.contiguous()
             # New contiguous copies use this stream's allocator. Keep only
             # the original inputs, which may have been allocated on other streams.
-            _submit_aiv(offload, components, di, hi, page_size, direction, device, host_layout, keepalive)  # fmt: skip
+            if backend == "aicpu":
+                _submit_aicpu(
+                    components, di, hi, page_size, direction, device, keepalive
+                )
+            else:
+                _submit_aiv(offload, components, di, hi, page_size, direction, device, host_layout, keepalive)  # fmt: skip
         finally:
-            # Inputs and pinned metadata staging survive failures too.
+            # Inputs and metadata survive failures too.
             done = torch.npu.Event()
             done.record(stream)
+            if backend == "aicpu":
+                _last_sparse_submission[device] = (stream, done)
             _inflight.append((done, keepalive))

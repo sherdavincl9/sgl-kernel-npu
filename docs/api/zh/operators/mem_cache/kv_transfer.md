@@ -5,6 +5,7 @@
 | 实现 | arch22 | arch35 |
 | --- | --- | --- |
 | `aiv` | 已开放注册，待实机验证 | 声明支持，本轮 PF/LF 改动待实机回归 |
+| `aicpu` | 待验证 | 待验证 |
 | `torch_native` | 未验证 | 同步正确性参考 |
 
 包装层不再按硬件代际限制注册，实际可用性取决于匹配的 MemFabric 后端和运行环境。已有初版 URMA 用例通过不等于本轮重构已经通过实机测试。
@@ -49,7 +50,7 @@ def transfer_kv_all_layer_kv_split(
 
 ```
 
-四个入口的 `auto` 均选择 `aiv`，支持逐层 H2D 和全层 D2H。显式 `impl` 可选 `aiv`、`torch_native`。
+四个入口的 `auto` 均选择 `aiv`，支持逐层 H2D 和全层 D2H。显式 `impl` 可选 `aiv`、`aicpu`、`torch_native`。
 
 ## 行为
 
@@ -83,6 +84,33 @@ Device 布局始终为 `[layer,page,token,head,dim]`。带 `pf_lf` 的逐层入�
 
 AIV 路径需要 MF 的 `host_register` / `host_get_device_pointer`。使用 `Scene.LOCAL` 和 `OFFLOAD_FLAG_HOST_MEM` 初始化，通过 `offload.empty` 分配 Host 缓冲区，并在传入切片前为每个完整分配调用一次 `host_memory.register_host_memory`。
 
+## aicpu
+
+包含 kv_sparse_metadata 的 wheel 中，四个接口均可显式选择 impl="aicpu"。
+沿用官方已有的 AICPU 构建框架：
+
+    python setup.py --arch-version 2201 --ops kv_sparse_metadata --artifact wheel
+
+默认 --ops all 也会发现这个算子。环境要求见官方
+[AICPU 构建说明](../../../../../python/sgl_kernel_npu/README.md#building-and-installing-aicpu-operators)。
+
+一次 AICPU 任务读取 NPU 上实时的页起始 indices，生成 src/dst（int64 地址位模式）
+和 lengths/count（int32），记录顺序为组件、页、层。固定组件描述通过 ACLNN
+整数数组属性传递，不增加独立的 metadata tensor 分配、pinned staging 或 metadata
+tensor H2D 拷贝；CANN 仍需序列化和下发任务参数。不使用 Triton 或 AIV 构表任务。
+
+Python 随后在同一 stream 调用 MF 原有 sparse_copy。Host 地址必须是 MF 池的 HVA，
+不支持 ACL-only 缓冲区或 AIV DVA。输入和输出表保留到 MF 完成。超过 65536
+条记录的批次在启动前报错；非法、未对齐或越界的页起始值输出安全的池基址和长度
+-1，交给 MF 校验。不支持 Graph capture。
+
+构表地址校验不需要初始化 MF entity：
+
+    python -m pytest tests/python/operators/mem_cache/test_kv_sparse_metadata_aicpu.py -v
+
+这组校验不搬运 KV payload。整条链路的验证需要匹配的 MF AICPU 资源和 MF Host 池。
+该后端尚无编译、实机正确性或性能验证结果。
+
 ## torch_native
 
 同步独立参考：直接用原始 Tensor 的层/页索引执行 Torch copy，不复用生产视图选择或地址生成。用于正确性对照，不用于评估搬运性能。
@@ -93,7 +121,7 @@ AIV 路径需要 MF 的 `host_register` / `host_get_device_pointer`。使用 `Sc
 
 ## NPU Graph 捕获
 
-当前 AIV 搬运路径不支持 NPU Graph 捕获。
+当前 AIV 和 AICPU 搬运路径均不支持 NPU Graph 捕获。
 
 ## 示例
 
