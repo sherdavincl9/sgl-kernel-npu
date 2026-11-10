@@ -1,0 +1,1 @@
+recursive-include sgl_kernel_npu/_cann/vendors/sgl_kernel_npu *
