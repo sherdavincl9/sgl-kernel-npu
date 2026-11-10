@@ -5,6 +5,8 @@
 #include <initializer_list>
 #include "cpu_kernel.h"
 namespace {
+const char *const kBuildKvSparseMetadata = "BuildKvSparseMetadata";
+
 void CacheRange(const void *ptr, size_t bytes, bool invalidate, uintptr_t line_size)
 {
     if (bytes == 0) return;
@@ -155,5 +157,5 @@ public:
         return BuildRecords(&args);
     }
 };
-REGISTER_CPU_KERNEL("BuildKvSparseMetadata", KvSparseMetadataKernel);
+REGISTER_CPU_KERNEL(kBuildKvSparseMetadata, KvSparseMetadataKernel);
 }
