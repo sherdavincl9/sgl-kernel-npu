@@ -75,6 +75,8 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> BuildMetadata(
     args.direction = direction;
     args.components = devices.size();
     uint64_t total = 0;
+    bool split_pages = false;
+    bool aligned_pages = true;
     for (size_t c = 0; c < devices.size(); ++c) {
         const auto &dev = devices[c];
         const auto &host = hosts[c];
@@ -86,9 +88,12 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> BuildMetadata(
         TORCH_CHECK(dev.size(0) > 0 && dev.size(1) > 0 && host.size(0) > 0 &&
                     dev.size(0) == host.size(1), "KV layer/page ranges must be nonempty and paired");
         const uint64_t layers = dev.size(0);
-        TORCH_CHECK(args.pages <= (kMaxRecords - total) / layers,
+        const uint64_t chunks = ChunksPerPage(bytes);
+        TORCH_CHECK(args.pages <= (kMaxRecords - total) / layers / chunks,
                     "MF sparse_copy supports at most 65536 records per batch");
-        total += args.pages * layers;
+        total += args.pages * layers * chunks;
+        split_pages |= chunks > 1;
+        aligned_pages &= bytes % kAivCopyAlignment == 0;
         const uint64_t item = dev.element_size();
         args.component[c] = {
             reinterpret_cast<uintptr_t>(dev.data_ptr()), reinterpret_cast<uintptr_t>(host.data_ptr()),
@@ -98,6 +103,11 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> BuildMetadata(
         CheckAddressRange(args.component[c], false);
         CheckAddressRange(args.component[c], true);
     }
+    // MF places the second record at local[first_length], which must be
+    // 32-byte aligned. Full chunks and their page tails must preserve this.
+    TORCH_CHECK(!split_pages || total < kMinAivPairedRecords || aligned_pages,
+                "Split MF AIV batches require page byte counts aligned to 32 bytes");
+    total = CopyRecordCount(total, split_pages);
     auto src = at_npu::native::empty_with_format(
         {static_cast<int64_t>(total)}, di.options(), ACL_FORMAT_ND, true);
     auto dst = at_npu::native::empty_with_format(
