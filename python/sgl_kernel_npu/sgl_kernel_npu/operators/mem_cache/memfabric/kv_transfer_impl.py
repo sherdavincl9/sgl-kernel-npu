@@ -218,12 +218,9 @@ def transfer_kv(
         raise ValueError("KV Device buffers must be NPU tensors")
     if device_indices.device != device or host_indices.device != device:
         raise ValueError("KV indices must be on the KV buffer's NPU")
-    has_indices = device_indices.numel() != 0
-    # The AICPU adapter validates component shapes and strides in C++.
-    if backend == "aiv" or not has_indices:
-        for dev, host in components:
-            _check_component(dev, host, page_size, device)
-    if not has_indices:
+    for dev, host in components:
+        _check_component(dev, host, page_size, device)
+    if not device_indices.numel():
         return
     with _submit_lock, torch.npu.device(device):
         if torch.npu.is_current_stream_capturing():

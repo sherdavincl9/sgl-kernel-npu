@@ -99,8 +99,8 @@ The default `--ops all` also discovers both operators. Follow the upstream
 
 One AICPU task reads the live NPU page-start indices and generates
 `src` and `dst` (int64 address bits) and `lengths` and `count` (int32).
-The four outputs share one allocation. Records are ordered by component, page,
-layer, and 32 KiB chunk; an extra split may be appended to keep paired copies even.
+The four outputs are allocated separately. Records are ordered by component,
+page, layer, and 32 KiB chunk; an extra split may be appended to keep paired copies even.
 The compact component
 description is an ACLNN integer array attribute, so it needs no staging tensor or
 separate H2D copy. CANN serializes and delivers the task parameters.

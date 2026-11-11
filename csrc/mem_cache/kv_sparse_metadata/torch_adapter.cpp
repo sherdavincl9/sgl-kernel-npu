@@ -108,17 +108,14 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> BuildMetadata(
     TORCH_CHECK(!split_pages || total < kMinAivPairedRecords || aligned_pages,
                 "Split MF AIV batches require page byte counts aligned to 32 bytes");
     total = CopyRecordCount(total, split_pages);
-    // One allocation avoids four passes through the allocator's event queue.
-    // All returned views retain this storage and are consumed on the same stream.
-    const int64_t records = static_cast<int64_t>(total);
-    const int64_t control_words = (records + 2) / 2;  // int32 lengths plus count, in int64 words.
-    auto metadata = at_npu::native::empty_with_format(
-        {2 * records + control_words}, di.options(), ACL_FORMAT_ND, true);
-    auto src = metadata.narrow(0, 0, records);
-    auto dst = metadata.narrow(0, records, records);
-    auto control = metadata.narrow(0, 2 * records, control_words).view(at::kInt);
-    auto lengths = control.narrow(0, 0, records);
-    auto count = control.narrow(0, records, 1);
+    auto src = at_npu::native::empty_with_format(
+        {static_cast<int64_t>(total)}, di.options(), ACL_FORMAT_ND, true);
+    auto dst = at_npu::native::empty_with_format(
+        {static_cast<int64_t>(total)}, di.options(), ACL_FORMAT_ND, true);
+    auto lengths = at_npu::native::empty_with_format(
+        {static_cast<int64_t>(total)}, di.options().dtype(at::kInt), ACL_FORMAT_ND, true);
+    auto count = at_npu::native::empty_with_format(
+        {1}, di.options().dtype(at::kInt), ACL_FORMAT_ND, true);
     std::vector<int64_t> info(args.components * kComponentFields);
     std::memcpy(info.data(), args.component, info.size() * sizeof(int64_t));
     std::shared_ptr<aclIntArray> infoDesc(

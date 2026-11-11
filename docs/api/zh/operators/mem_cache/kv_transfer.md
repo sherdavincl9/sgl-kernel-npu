@@ -98,7 +98,7 @@ A3 使用 `python3 setup.py --arch-version 2201 --ops kv_exchange` 构建，A5 �
 [AICPU 构建说明](../../../../../python/sgl_kernel_npu/README.md#building-and-installing-aicpu-operators)。
 
 一次 AICPU 任务读取 NPU 上实时的页起始 indices，生成 `src`、`dst`（int64 地址位模式）
-及 `lengths`、`count`（int32），四个输出共享一次分配。记录按组件、页、层、32 KiB 分块排列，
+及 `lengths`、`count`（int32），四个输出分别分配。记录按组件、页、层、32 KiB 分块排列，
 必要时在末尾追加一条拆分记录，使配对搬运的条数为偶数。组件描述通过 ACLNN 整数数组
 属性传递，无需暂存张量或单独的 H2D 拷贝。CANN 负责序列化并下发任务参数。
 

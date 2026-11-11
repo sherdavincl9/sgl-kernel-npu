@@ -33,11 +33,8 @@ static uint32_t BuildRecords(
     if (!args || !args->components || args->components > kMaxComponents ||
         !args->page_size || (args->direction != 1 && args->direction != 2) ||
         (args->pages && (!args->device_indices || !args->host_indices)) || !args->count) return 1;
-    const bool host_to_device = args->direction == 1;
-    const uint64_t page_size = args->page_size;
     uint64_t offsets[kMaxComponents]{};
     uint64_t chunks[kMaxComponents]{};
-    int32_t tail_bytes[kMaxComponents]{};
     uint64_t records = 0;
     uint64_t split_record = kMaxRecords;
     for (uint64_t c = 0; c < args->components; ++c) {
@@ -45,7 +42,6 @@ static uint32_t BuildRecords(
         if (!m.layers ||
             !m.device_base || !m.host_base || !m.page_bytes || m.page_bytes > INT32_MAX) return 1;
         chunks[c] = ChunksPerPage(m.page_bytes);
-        tail_bytes[c] = static_cast<int32_t>(m.page_bytes - (chunks[c] - 1) * kMaxCopyBytes);
         if (args->pages > (kMaxRecords - records) / m.layers / chunks[c]) return 1;
         offsets[c] = records;
         if (chunks[c] > 1 && split_record == kMaxRecords) split_record = records;
@@ -69,20 +65,22 @@ static uint32_t BuildRecords(
     // Invalidate only the cache lines containing page starts. Batch the
     // barrier across all pages rather than stalling twice per page.
     for (uint64_t p = 0; p < args->pages; ++p) {
-        CacheRange(di + p * page_size, sizeof(*di), true, line_size);
-        CacheRange(hi + p * page_size, sizeof(*hi), true, line_size);
+        CacheRange(di + p * args->page_size, sizeof(*di), true, line_size);
+        CacheRange(hi + p * args->page_size, sizeof(*hi), true, line_size);
     }
     CacheBarrier();
     for (uint64_t p = 0; p < args->pages; ++p) {
         // Only page starts are read, once per page across all components.
-        const int64_t dt = di[p * page_size], ht = hi[p * page_size];
-        const uint64_t dp = dt >= 0 ? static_cast<uint64_t>(dt) / page_size : 0;
-        const uint64_t hp = ht >= 0 ? static_cast<uint64_t>(ht) / page_size : 0;
-        const bool aligned = dt >= 0 && ht >= 0 &&
-            dp * page_size == static_cast<uint64_t>(dt) && hp * page_size == static_cast<uint64_t>(ht);
+        const int64_t dt = di[p * args->page_size], ht = hi[p * args->page_size];
+        const uint64_t dp = dt >= 0 ? static_cast<uint64_t>(dt) / args->page_size : 0;
+        const uint64_t hp = ht >= 0 ? static_cast<uint64_t>(ht) / args->page_size : 0;
         for (uint64_t c = 0; c < args->components; ++c) {
             const auto &m = args->component[c];
-            if (!aligned || dp >= m.device_pages || hp >= m.host_pages) {
+            const bool valid = dt >= 0 && ht >= 0 &&
+                static_cast<uint64_t>(dt) % args->page_size == 0 &&
+                static_cast<uint64_t>(ht) % args->page_size == 0 &&
+                dp < m.device_pages && hp < m.host_pages;
+            if (!valid) {
                 // MF may already be queued. Publish an empty batch before
                 // reporting the error so it cannot consume partial tables.
                 *count = 0;
@@ -94,29 +92,18 @@ static uint32_t BuildRecords(
                     static_cast<long long>(dt), static_cast<long long>(ht));
                 return 1;
             }
-            const uint64_t chunk_count = chunks[c];
-            uint64_t row = offsets[c] + p * m.layers * chunk_count;
-            const uint64_t da = m.device_base + dp * m.device_page_stride;
-            const uint64_t ha = m.host_base + hp * m.host_page_stride;
-            uint64_t src_layer = host_to_device ? ha : da;
-            uint64_t dst_layer = host_to_device ? da : ha;
-            const uint64_t src_stride = host_to_device ? m.host_layer_stride : m.device_layer_stride;
-            const uint64_t dst_stride = host_to_device ? m.device_layer_stride : m.host_layer_stride;
             for (uint64_t layer = 0; layer < m.layers; ++layer) {
-                uint64_t src_chunk = src_layer;
-                uint64_t dst_chunk = dst_layer;
-                for (uint64_t chunk = 1; chunk < chunk_count; ++chunk) {
-                    src[row] = src_chunk;
-                    dst[row] = dst_chunk;
-                    lengths[row++] = static_cast<int32_t>(kMaxCopyBytes);
-                    src_chunk += kMaxCopyBytes;
-                    dst_chunk += kMaxCopyBytes;
+                const uint64_t first = offsets[c] + (p * m.layers + layer) * chunks[c];
+                const uint64_t da = m.device_base + layer * m.device_layer_stride + dp * m.device_page_stride;
+                const uint64_t ha = m.host_base + layer * m.host_layer_stride + hp * m.host_page_stride;
+                for (uint64_t chunk = 0; chunk < chunks[c]; ++chunk) {
+                    const uint64_t offset = chunk * kMaxCopyBytes;
+                    const uint64_t remaining = m.page_bytes - offset;
+                    src[first + chunk] = (args->direction == 1 ? ha : da) + offset;
+                    dst[first + chunk] = (args->direction == 1 ? da : ha) + offset;
+                    lengths[first + chunk] = static_cast<int32_t>(
+                        remaining < kMaxCopyBytes ? remaining : kMaxCopyBytes);
                 }
-                src[row] = src_chunk;
-                dst[row] = dst_chunk;
-                lengths[row++] = tail_bytes[c];
-                src_layer += src_stride;
-                dst_layer += dst_stride;
             }
         }
     }
