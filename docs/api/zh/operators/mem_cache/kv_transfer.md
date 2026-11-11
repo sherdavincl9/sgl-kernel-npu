@@ -4,11 +4,11 @@
 
 | 实现 | arch22 | arch35 |
 | --- | --- | --- |
-| `aiv` | 已开放注册，待实机验证 | 声明支持，本轮 PF/LF 改动待实机回归 |
-| `aicpu` | 待验证 | 待验证 |
-| `torch_native` | 未验证 | 同步正确性参考 |
+| `ascendc_aiv` | 支持 | 支持 |
+| `aicpu` | 需要兼容的 MemFabric AICPU copy | 需要兼容的 MemFabric AICPU copy |
+| `torch_native` | 支持 | 支持 |
 
-包装层不再按硬件代际限制注册，实际可用性取决于匹配的 MemFabric 后端和运行环境。已有初版 URMA 用例通过不等于本轮重构已经通过实机测试。
+AIV 实现面向 Ascend A3（arch22）和 A5（arch35）。运行时需匹配对应硬件，并提供已注册的 Host 内存。
 
 ## 签名
 
@@ -50,7 +50,8 @@ def transfer_kv_all_layer_kv_split(
 
 ```
 
-四个入口的 `auto` 均选择 `aiv`，支持逐层 H2D 和全层 D2H。显式 `impl` 可选 `aiv`、`aicpu`、`torch_native`。
+四个入口的 `auto` 均选择 `ascendc_aiv`，支持逐层 H2D 和全层 D2H。显式 `impl` 可选 `ascendc_aiv`、`aicpu`、`torch_native`。
+旧调用可继续使用 `aiv`，它是 `ascendc_aiv` 的兼容别名。
 
 ## 行为
 
@@ -76,40 +77,41 @@ Device 布局始终为 `[layer,page,token,head,dim]`。带 `pf_lf` 的逐层入�
 | `impl` | 关键字参数，默认 auto；见各后端说明 |
 | 返回值 | None；H2D 原地修改 Device，D2H 原地修改 Host |
 
-每个 `(page,layer)` 内的载荷必须连续，允许 Host 层切片形成的跨页间隙。Host 缓冲区须由调用者通过匹配的 MemFabric 分配/注册流程提供。
+每个 `(page,layer)` 内的载荷必须连续，允许 Host 层切片形成的跨页间隙。Host 内存的分配和注册要求取决于所选实现。
 
-## aiv
+## ascendc_aiv
 
-通过 `host_memory.resolve_host_dva` 获取已注册 Host 的设备地址，然后经仓内 `kv_exchange` CANN 算子（`torch.ops.npu.kv_exchange`）提交：C++ adapter 构造驻留设备的 44 槽 metadata（实际层/页 stride、单页字节数、PF/LF 遍历模式和每组件层区间）并在调用方流上启动 AIV kernel。承载 metadata 上传的 pinned staging 会返回给 wrapper，由完成事件保活。
+通过算子目录中的 Host 内存辅助函数解析已注册 Host 的设备地址，再调用 CANN `kv_exchange` 算子（`torch.ops.npu.kv_exchange`）。Torch adapter 通过 ACLNN 属性传入组件地址、页和层的 stride 以及遍历参数。CANN tiling 将描述交给调用方流上的 AIV kernel。
 
-AIV 路径需要已注册的 Host 内存。创建 `memfabric_hybrid.offload.Offload` 实例，以 `Scene.LOCAL` 且 `alloc_size == reserve_size` 初始化，通过 `host_memory.set_memfabric_pool` 发布实例，用 `pool.empty` 分配 Host 缓冲区，并在传入切片前为每个完整分配调用一次 `host_memory.register_host_memory`。
+A3 使用 `python3 setup.py --arch-version 2201 --ops kv_exchange` 构建，A5 使用 `--arch-version 3510`。
+
+使用 MemFabric 时，创建 `memfabric_hybrid.offload.Offload` 实例，以 `Scene.LOCAL` 且 `alloc_size == reserve_size` 初始化，通过 `host_memory.set_memfabric_pool` 发布实例，用 `pool.empty` 分配 Host 缓冲区，并在传入切片前为每个完整分配调用一次 `host_memory.register_host_memory`。使用 ACL 时，分配 CPU 张量，并为每个完整分配调用一次 `host_memory.register_acl_host_memory`。
 
 ## aicpu
 
-包含 kv_sparse_metadata 的 wheel 中，四个接口均可显式选择 impl="aicpu"。
-沿用官方已有的 AICPU 构建框架：
+包含 `kv_sparse_metadata` 的 wheel 中，四个接口均可显式选择 `impl="aicpu"`。
+在 A3 上可以用以下命令同时构建 AIV 和 AICPU 算子。
 
-    python setup.py --arch-version 2201 --ops kv_sparse_metadata --artifact wheel
+    python3 setup.py --arch-version 2201 --ops kv_exchange,kv_sparse_metadata --artifact wheel
 
-默认 --ops all 也会发现这个算子。环境要求见官方
+默认 `--ops all` 也会发现这两个算子。环境要求见官方
 [AICPU 构建说明](../../../../../python/sgl_kernel_npu/README.md#building-and-installing-aicpu-operators)。
 
-一次 AICPU 任务读取 NPU 上实时的页起始 indices，生成 src/dst（int64 地址位模式）
-和 lengths/count（int32），记录顺序为组件、页、层。固定组件描述通过 ACLNN
-整数数组属性传递，不增加独立的 metadata tensor 分配、pinned staging 或 metadata
-tensor H2D 拷贝；CANN 仍需序列化和下发任务参数。不使用 Triton 或 AIV 构表任务。
+一次 AICPU 任务读取 NPU 上实时的页起始 indices，生成 `src`、`dst`（int64 地址位模式）
+及 `lengths`、`count`（int32），记录按组件、页、层排列。组件描述通过 ACLNN 整数数组
+属性传递，无需暂存张量或单独的 H2D 拷贝。CANN 负责序列化并下发任务参数。
 
-Python 随后在同一 stream 调用 MF 原有 sparse_copy。Host 地址必须是 MF 池的 HVA，
-不支持 ACL-only 缓冲区或 AIV DVA。输入和输出表保留到 MF 完成。超过 65536
-条记录的批次在启动前报错；非法、未对齐或越界的页起始值输出安全的池基址和长度
--1，交给 MF 校验。不支持 Graph capture。
+Python 在同一提交流上，通过 `host_memory.set_memfabric_pool` 发布的已初始化池调用
+`sparse_copy`。没有发布池时，调用方须初始化旧版模块级入口，Python 调用
+`offload.sparse_copy`。MemFabric 必须支持使用原始 Host 虚拟地址（HVA）的 AICPU
+稀疏拷贝，Host 缓冲区须来自同一个池。超过 65,536 条记录的批次在启动前报错。
+非法、未对齐或越界的页起始值会生成安全的池基址和长度 `-1`，供 MemFabric 校验。
 
 构表地址校验不需要初始化 MF entity：
 
     python -m pytest tests/python/operators/mem_cache/test_kv_sparse_metadata_aicpu.py -v
 
-这组校验不搬运 KV payload。整条链路的验证需要匹配的 MF AICPU 资源和 MF Host 池。
-该后端尚无编译、实机正确性或性能验证结果。
+验证整条搬运链路还需要兼容的 MemFabric AICPU kernel 和匹配的 Host 池。
 
 ## torch_native
 
@@ -117,7 +119,9 @@ Python 随后在同一 stream 调用 MF 原有 sparse_copy。Host 地址必须�
 
 ## 流与生命周期
 
-生产实现提交到调用者当前 NPU stream，不创建搬运 stream，也不执行同步。调用者负责生产者依赖及消费完成事件，并在传输结束前禁止改写/复用相关存储。包装保留原始输入和 metadata 的 pinned staging，直到事件完成。同流分配、使用的新连续索引由分配器的流顺序保证生命周期。跨流数据依赖由调用者提供。释放 MemFabric entity 前须同步并结束所有使用该 entity 的传输。
+AIV 在调用者的当前 NPU 流上提交搬运。C++ adapter 对 Device 组件和传给它的两个索引张量调用 `record_stream`，由 NPU 缓存分配器保护其存储直至搬运完成。连续索引副本在提交流上创建并使用。调用者负责建立跨流依赖，保留 Host 缓冲区及其注册直至搬运完成，并等待搬运结束后再改写或复用相关存储。释放 MemFabric 池前，须同步所有尚未完成的搬运。
+
+AICPU 在调用者的当前 NPU 流上提交构表和 MemFabric copy。封装层保留输入和地址表直到完成事件，并为同一设备上跨流的 MemFabric copy 建立顺序。张量的生产和消费依赖由调用者负责。
 
 ## NPU Graph 捕获
 
@@ -129,7 +133,7 @@ Python 随后在同一 stream 调用 MF 原有 sparse_copy。Host 地址必须�
 import torch
 import torch_npu
 from memfabric_hybrid import offload
-from sgl_kernel_npu.host_memory import (
+from sgl_kernel_npu.operators.mem_cache.memfabric.host_memory import (
     register_host_memory,
     set_memfabric_pool,
     uninitialize_host_memory,
@@ -158,9 +162,9 @@ source = torch.arange(ps, 2 * ps, dtype=torch.int64, device="npu")
 saved = torch.arange(2 * ps, 3 * ps, dtype=torch.int64, device="npu")
 target = torch.arange(3 * ps, 4 * ps, dtype=torch.int64, device="npu")
 backup(source, saved, dev, host, empty_dev, empty_host, page_size=ps,
-       host_layer_start=1, impl="aiv")
+       host_layer_start=1, impl="ascendc_aiv")
 load(target, saved, dev, host, empty_dev, empty_host, page_size=ps,
-     device_layer_id=2, host_layer_id=1, impl="aiv")
+     device_layer_id=2, host_layer_id=1, impl="ascendc_aiv")
 torch.npu.synchronize()
 assert torch.equal(dev[2, 3].cpu(), original[0, 1])
 del host
@@ -173,7 +177,7 @@ LF Host 可改为 `[5,6,ps,1,8]`，即 `[host_layers,host_pages,ps,1,8]` 分配�
 ## 验证
 
 ```bash
-python -m pytest tests/python/operators/mem_cache/test_kv_transfer.py --impl aiv --impl-ref torch_native --enable-perf=false -v -s -rs
+python -m pytest tests/python/operators/mem_cache/test_kv_transfer.py --impl ascendc_aiv --impl-ref torch_native --enable-perf=false -v -s -rs
 ```
 
-测试为 `auto` 和 `aiv` 均初始化 LOCAL Host-memory entry，并注册完整 Host 分配。对原地修改目标使用独立缓冲区，逐字节比较后通过 `make_executor` / `check_performance` 采集。共享性能工具报告 NPU task 耗时之和，不包含全部 CPU 提交开销；端到端开销须另行计时。需要可用 NPU、匹配的 CANN/Torch/MemFabric，以及包含仓内 `kv_exchange` 算子的构建。
+测试为 `auto` 和 `ascendc_aiv` 均初始化 LOCAL Host-memory entry，并注册完整 Host 分配。对原地修改目标使用独立缓冲区，逐字节比较后通过 `make_executor` / `check_performance` 采集。共享性能工具报告 NPU task 耗时之和，不包含全部 CPU 提交开销；端到端开销须另行计时。需要可用 NPU、匹配的 CANN/Torch/MemFabric，以及包含仓内 `kv_exchange` 算子的构建。

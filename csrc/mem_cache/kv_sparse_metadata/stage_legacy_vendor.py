@@ -1,4 +1,4 @@
-"""Build and stage the KV metadata CANN vendor for the legacy wheel."""
+"""Build and stage the KV transfer CANN vendor for the legacy wheel."""
 
 import shutil
 import sys
@@ -14,7 +14,7 @@ def main():
     build_dir = Path(build_dir)
     destination = Path(destination)
     try:
-        result = build_cann(arch, ("kv_sparse_metadata",), build_root=build_dir)
+        result = build_cann(arch, ("kv_exchange", "kv_sparse_metadata"), build_root=build_dir)
         _remove_tree(destination)
         shutil.copytree(result.vendor, destination)
     finally:
