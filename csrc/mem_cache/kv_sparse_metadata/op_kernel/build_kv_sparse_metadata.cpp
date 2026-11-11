@@ -4,6 +4,7 @@
 #include <cstring>
 #include <initializer_list>
 #include "cpu_kernel.h"
+#include "log.h"
 namespace {
 const char *const kBuildKvSparseMetadata = "BuildKvSparseMetadata";
 
@@ -24,6 +25,7 @@ void CacheBarrier()
     asm volatile("dsb sy" ::: "memory");
 }
 }
+namespace aicpu {
 static uint32_t BuildRecords(
     const sglang::kv_metadata::Args *args)
 {
@@ -72,16 +74,25 @@ static uint32_t BuildRecords(
                 static_cast<uint64_t>(dt) % args->page_size == 0 &&
                 static_cast<uint64_t>(ht) % args->page_size == 0 &&
                 dp < m.device_pages && hp < m.host_pages;
+            if (!valid) {
+                // MF may already be queued. Publish an empty batch before
+                // reporting the error so it cannot consume partial tables.
+                *count = 0;
+                CacheRange(count, sizeof(*count), false, line_size);
+                CacheBarrier();
+                KERNEL_LOG_ERROR(
+                    "Invalid KV page start at page %llu, component %llu: device=%lld, host=%lld",
+                    static_cast<unsigned long long>(p), static_cast<unsigned long long>(c),
+                    static_cast<long long>(dt), static_cast<long long>(ht));
+                return 1;
+            }
             for (uint64_t layer = 0; layer < m.layers; ++layer) {
                 const uint64_t i = offsets[c] + p * m.layers + layer;
-                const uint64_t da = valid ? m.device_base + layer * m.device_layer_stride +
-                    dp * m.device_page_stride : m.device_base;
-                const uint64_t ha = valid ? m.host_base + layer * m.host_layer_stride +
-                    hp * m.host_page_stride : m.host_base;
+                const uint64_t da = m.device_base + layer * m.device_layer_stride + dp * m.device_page_stride;
+                const uint64_t ha = m.host_base + layer * m.host_layer_stride + hp * m.host_page_stride;
                 src[i] = args->direction == 1 ? ha : da;
                 dst[i] = args->direction == 1 ? da : ha;
-                // MF validates all records before issuing any payload copy.
-                lengths[i] = valid ? static_cast<int32_t>(m.page_bytes) : -1;
+                lengths[i] = static_cast<int32_t>(m.page_bytes);
             }
         }
     }
@@ -97,7 +108,6 @@ static uint32_t BuildRecords(
     return 0;
 }
 
-namespace aicpu {
 class KvSparseMetadataKernel : public CpuKernel {
 public:
     uint32_t Compute(CpuKernelContext &ctx) override

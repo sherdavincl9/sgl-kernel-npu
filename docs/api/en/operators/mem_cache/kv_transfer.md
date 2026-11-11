@@ -108,9 +108,9 @@ published with `host_memory.set_memfabric_pool`. If no pool was published, it
 uses the legacy module-level `offload.sparse_copy` and the caller must initialize
 that entry. The selected MemFabric copy must support AICPU sparse copy with
 original Host virtual addresses (HVAs), using buffers from the same pool.
-Batches above 65,536 records are rejected before launch. Invalid, unaligned,
-or out-of-range page starts produce safe pool-base addresses and length `-1`
-for MemFabric validation.
+Batches above 65,536 records are rejected before launch. If a page start is
+invalid, unaligned, or out of range, the builder publishes an empty batch and
+reports an error.
 
 The AICPU builder's address checks can be run without an MF entity:
 
@@ -127,7 +127,7 @@ An independent synchronous reference directly copies original Tensor layer/page 
 
 AIV enqueues on the caller's current NPU stream. The C++ adapter uses `record_stream` on the Device components and both index tensors passed to it, so the NPU caching allocator keeps their storage alive until the transfer completes. Contiguous index copies are created and used on the submission stream. The caller provides cross-stream dependencies, keeps Host buffers and their registrations alive through completion, and waits before modifying or reusing transfer storage. Synchronize outstanding transfers before releasing the MemFabric pool.
 
-AICPU enqueues metadata generation and MemFabric copy on the caller's current NPU stream. The wrapper retains inputs and address tables until the completion event and orders MemFabric submissions across streams on the same device. The caller provides the producer and consumer dependencies for its tensors.
+AICPU enqueues metadata generation and MemFabric copy on the caller's current NPU stream. Its C++ adapter records the Device components and original indices on that stream. The address tables are allocated and consumed on the same stream. The wrapper orders MemFabric submissions across streams on the same device. The caller owns the Host buffers and provides dependencies between producers, transfers, and consumers.
 
 ## NPU graph capture
 

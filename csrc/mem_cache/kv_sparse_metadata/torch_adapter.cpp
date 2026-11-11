@@ -12,12 +12,14 @@
 
 namespace sglang::kv_metadata {
 namespace {
-void CheckIndices(const at::Tensor &tensor, const at::Device &device)
+at::Tensor PrepareIndices(const at::Tensor &tensor, const at::Device &device, const c10_npu::NPUStream &stream)
 {
     TORCH_CHECK(tensor.device() == device && tensor.scalar_type() == at::kLong &&
-                tensor.dim() == 1 && tensor.is_contiguous() &&
-                at_npu::native::get_npu_format(tensor) == ACL_FORMAT_ND,
-                "AICPU metadata indices must be contiguous 1-D int64 ND tensors on the KV NPU");
+                tensor.dim() == 1, "AICPU metadata indices must be 1-D int64 tensors on the KV NPU");
+    tensor.record_stream(stream);
+    auto indices = tensor.contiguous();
+    TORCH_CHECK(at_npu::native::get_npu_format(indices) == ACL_FORMAT_ND, "AICPU metadata indices must use ND format");
+    return indices;
 }
 
 uint64_t PageBytes(const at::Tensor &tensor, int64_t page_size)
@@ -51,7 +53,7 @@ void CheckAddressRange(const Component &m, bool host)
 }
 
 std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> BuildMetadata(
-    const at::Tensor &di, const at::Tensor &hi, at::TensorList devices,
+    const at::Tensor &device_indices, const at::Tensor &host_indices, at::TensorList devices,
     at::TensorList hosts, int64_t page_size, int64_t direction)
 {
     TORCH_CHECK(page_size > 0 && (direction == 1 || direction == 2), "Invalid KV page size or direction");
@@ -60,10 +62,11 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> BuildMetadata(
     const auto device = devices[0].device();
     TORCH_CHECK(device.type() == c10::DeviceType::PrivateUse1, "KV buffers must be on NPU");
     c10::OptionalDeviceGuard guard(device);
-    CheckIndices(di, device);
-    CheckIndices(hi, device);
-    TORCH_CHECK(di.numel() == hi.numel() && di.numel() % page_size == 0,
+    TORCH_CHECK(device_indices.numel() == host_indices.numel() && device_indices.numel() % page_size == 0,
                 "Indices must describe equal numbers of complete pages");
+    const auto stream = c10_npu::getCurrentNPUStream();
+    const auto di = PrepareIndices(device_indices, device, stream);
+    const auto hi = PrepareIndices(host_indices, device, stream);
     Args args{};
     args.device_indices = reinterpret_cast<uintptr_t>(di.data_ptr());
     args.host_indices = reinterpret_cast<uintptr_t>(hi.data_ptr());
@@ -125,13 +128,17 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> BuildMetadata(
     TORCH_CHECK(status == ACL_SUCCESS, "KV metadata workspace query failed: ", aclGetRecentErrMsg());
     TORCH_CHECK(workspaceSize <= static_cast<uint64_t>(std::numeric_limits<int64_t>::max()),
                 "ACLNN workspace exceeds Tensor allocation limit");
-    auto workspace = at::empty({static_cast<int64_t>(workspaceSize)}, di.options().dtype(at::kByte));
-    std::array<at::Tensor, 7> keepalive{di, hi, src, dst, lengths, count, workspace};
-    const auto stream = c10_npu::getCurrentNPUStream();
-    for (const auto &tensor : keepalive) tensor.record_stream(stream);
+    at::Tensor workspace;
+    if (workspaceSize > 0) {
+        workspace = at::empty({static_cast<int64_t>(workspaceSize)}, di.options().dtype(at::kByte));
+    }
+    for (const auto &tensor : devices) {
+        tensor.record_stream(stream);
+    }
     const auto aclStream = stream.stream(false);
-    // Match the upstream AICPU adapter: retain tensors and descriptors for the
-    // host queue, and record_stream for asynchronous device use.
+    // Metadata and workspace are allocated and consumed on this stream.
+    // Keep their owners alive through the queued ACLNN launch.
+    std::array<at::Tensor, 7> keepalive{di, hi, src, dst, lengths, count, workspace};
     auto launch = [keepalive, descriptors, infoDesc, workspaceSize, executor, aclStream]() -> int {
         const auto result = execute(
             workspaceSize ? keepalive.back().data_ptr() : nullptr, workspaceSize, executor, aclStream);

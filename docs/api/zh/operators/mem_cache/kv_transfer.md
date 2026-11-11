@@ -105,7 +105,7 @@ Python 在同一提交流上，通过 `host_memory.set_memfabric_pool` 发布的
 `sparse_copy`。没有发布池时，调用方须初始化旧版模块级入口，Python 调用
 `offload.sparse_copy`。MemFabric 必须支持使用原始 Host 虚拟地址（HVA）的 AICPU
 稀疏拷贝，Host 缓冲区须来自同一个池。超过 65,536 条记录的批次在启动前报错。
-非法、未对齐或越界的页起始值会生成安全的池基址和长度 `-1`，供 MemFabric 校验。
+发现非法、未对齐或越界的页起始值时，构表任务会发布空批次并报告错误。
 
 构表地址校验不需要初始化 MF entity：
 
@@ -121,7 +121,7 @@ Python 在同一提交流上，通过 `host_memory.set_memfabric_pool` 发布的
 
 AIV 在调用者的当前 NPU 流上提交搬运。C++ adapter 对 Device 组件和传给它的两个索引张量调用 `record_stream`，由 NPU 缓存分配器保护其存储直至搬运完成。连续索引副本在提交流上创建并使用。调用者负责建立跨流依赖，保留 Host 缓冲区及其注册直至搬运完成，并等待搬运结束后再改写或复用相关存储。释放 MemFabric 池前，须同步所有尚未完成的搬运。
 
-AICPU 在调用者的当前 NPU 流上提交构表和 MemFabric copy。封装层保留输入和地址表直到完成事件，并为同一设备上跨流的 MemFabric copy 建立顺序。张量的生产和消费依赖由调用者负责。
+AICPU 在调用者的当前 NPU 流上提交构表和 MemFabric copy。C++ adapter 在该流上记录 Device 组件和原始索引，地址表也在同一流上分配和消费。封装层为同一设备上的跨流 MemFabric copy 建立顺序。调用者负责持有 Host 缓冲区，并建立生产、搬运和消费之间的依赖。
 
 ## NPU Graph 捕获
 
