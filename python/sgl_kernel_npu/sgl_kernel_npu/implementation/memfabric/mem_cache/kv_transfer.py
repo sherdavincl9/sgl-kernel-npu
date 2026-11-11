@@ -127,7 +127,17 @@ def _submit_aicpu(components, di, hi, page_size, direction, device, keepalive):
     build = getattr(torch.ops.npu, "kv_sparse_metadata_aicpu", None)
     if build is None:
         raise RuntimeError("Rebuild sgl-kernel-npu with --ops kv_sparse_metadata")
-    from memfabric_hybrid import offload
+    from sgl_kernel_npu.host_memory import get_memfabric_pool
+
+    pool = get_memfabric_pool()
+    if pool is None:
+        from memfabric_hybrid import offload
+
+        # Older MF callers initialize and allocate through the module API.
+        pool = offload
+    sparse_copy = getattr(pool, "sparse_copy", None)
+    if not callable(sparse_copy):
+        raise RuntimeError("The MemFabric pool must provide sparse_copy")
 
     src, dst, lengths, count = build(
         di,
@@ -138,7 +148,7 @@ def _submit_aicpu(components, di, hi, page_size, direction, device, keepalive):
         direction,
     )
     keepalive.extend((src, dst, lengths, count))
-    ret = offload.sparse_copy(src, dst, lengths, count, device)
+    ret = sparse_copy(src, dst, lengths, count, device)
     if ret != 0:
         raise RuntimeError(f"MF sparse_copy failed: code={ret}")
 
