@@ -23,6 +23,19 @@ def indices(starts, page_size):
     )
 
 
+def _assert_shared_metadata_storage(src, dst, lengths, count):
+    tables = (src, dst, lengths, count)
+    assert [t.dtype for t in tables] == [torch.int64, torch.int64, torch.int32, torch.int32]
+    assert src.numel() == dst.numel() == lengths.numel() and count.numel() == 1
+    assert all(t.is_contiguous() for t in tables)
+    storage = src.untyped_storage()
+    base, limit = storage.data_ptr(), storage.data_ptr() + storage.nbytes()
+    assert all(t.untyped_storage().data_ptr() == base for t in tables)
+    ranges = sorted((t.data_ptr(), t.data_ptr() + t.nbytes) for t in tables if t.numel())
+    assert all(base <= start < end <= limit for start, end in ranges)
+    assert all(left[1] <= right[0] for left, right in zip(ranges, ranges[1:]))
+
+
 @pytest.mark.parametrize("layout", ["page_first", "layer_first"])
 @pytest.mark.parametrize("direction", [1, 2])
 @pytest.mark.parametrize("component_count", [1, 2, 3, 4])
@@ -59,6 +72,7 @@ def test_addresses_and_updated_indices(layout, direction, component_count):
         di.copy_(indices(dstarts, ps))
         hi.copy_(indices(hstarts, ps))
         src, dst, lengths, count = build(di, hi, devices, hosts, ps, direction)
+        _assert_shared_metadata_storage(src, dst, lengths, count)
         expected_src, expected_dst, expected_lengths = [], [], []
         for dev, host in zip(devices, hosts):
             item = dev.element_size()
@@ -120,6 +134,7 @@ def test_empty_tables():
     host = torch.empty((10, 1, 4, 1, 1), dtype=torch.uint8)
     di = torch.empty(0, dtype=torch.int64, device="npu")
     src, dst, lengths, count = build(di, di, [dev], [host], 4, 1)
+    _assert_shared_metadata_storage(src, dst, lengths, count)
     assert src.numel() == dst.numel() == lengths.numel() == 0
     assert count.cpu().item() == 0
 
@@ -238,6 +253,7 @@ def test_large_page_copy_coverage(
                 originals.append((source, destination, dev[layer, dp].nbytes))
 
     src, dst, lengths, count = build(di, hi, devices, hosts, page_size, direction)
+    _assert_shared_metadata_storage(src, dst, lengths, count)
     assert count.cpu().item() == expected_count
     assert src.numel() == dst.numel() == lengths.numel() == expected_count
     _assert_copy_coverage(

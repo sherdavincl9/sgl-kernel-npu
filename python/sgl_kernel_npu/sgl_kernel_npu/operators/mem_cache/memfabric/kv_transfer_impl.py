@@ -13,7 +13,6 @@ import torch
 from .host_memory import _load_offload, get_memfabric_pool
 
 _submit_lock = Lock()
-_last_sparse_submission = {}
 
 
 def _check_component(device, host, page_size, index_device):
@@ -146,18 +145,9 @@ def _submit_aicpu(components, device_indices, host_indices, page_size, direction
         page_size,
         direction,
     )
-    # The tables were allocated on this stream. Only the shared MF copy context
-    # needs a dependency when switching between submission streams.
-    stream = torch.npu.current_stream()
-    previous = _last_sparse_submission.get(device)
-    if previous is not None and stream != previous[0]:
-        stream.wait_event(previous[1])
-    try:
-        ret = sparse_copy(src, dst, lengths, count, device)
-    finally:
-        done = torch.npu.Event()
-        done.record(stream)
-        _last_sparse_submission[device] = (stream, done)
+    # MF LOCAL enqueues its stateless copy on the same stream as the builder.
+    # HiCache owns the dependencies for KV data; no extra completion event is needed here.
+    ret = sparse_copy(src, dst, lengths, count, device)
     if ret != 0:
         raise RuntimeError(f"MF sparse_copy failed: code={ret}")
 
@@ -228,9 +218,12 @@ def transfer_kv(
         raise ValueError("KV Device buffers must be NPU tensors")
     if device_indices.device != device or host_indices.device != device:
         raise ValueError("KV indices must be on the KV buffer's NPU")
-    for dev, host in components:
-        _check_component(dev, host, page_size, device)
-    if not device_indices.numel():
+    has_indices = device_indices.numel() != 0
+    # The AICPU adapter validates component shapes and strides in C++.
+    if backend == "aiv" or not has_indices:
+        for dev, host in components:
+            _check_component(dev, host, page_size, device)
+    if not has_indices:
         return
     with _submit_lock, torch.npu.device(device):
         if torch.npu.is_current_stream_capturing():

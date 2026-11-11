@@ -98,20 +98,22 @@ A3 使用 `python3 setup.py --arch-version 2201 --ops kv_exchange` 构建，A5 �
 [AICPU 构建说明](../../../../../python/sgl_kernel_npu/README.md#building-and-installing-aicpu-operators)。
 
 一次 AICPU 任务读取 NPU 上实时的页起始 indices，生成 `src`、`dst`（int64 地址位模式）
-及 `lengths`、`count`（int32），记录按组件、页、层排列。组件描述通过 ACLNN 整数数组
+及 `lengths`、`count`（int32），四个输出共享一次分配。记录按组件、页、层、32 KiB 分块排列，
+必要时在末尾追加一条拆分记录，使配对搬运的条数为偶数。组件描述通过 ACLNN 整数数组
 属性传递，无需暂存张量或单独的 H2D 拷贝。CANN 负责序列化并下发任务参数。
 
 Python 在同一提交流上，通过 `host_memory.set_memfabric_pool` 发布的已初始化池调用
 `sparse_copy`。没有发布池时，调用方须初始化旧版模块级入口，Python 调用
-`offload.sparse_copy`。MemFabric 必须支持使用原始 Host 虚拟地址（HVA）的 AICPU
-稀疏拷贝，Host 缓冲区须来自同一个池。超过 65,536 条记录的批次在启动前报错。
+`offload.sparse_copy`。`impl="aicpu"` 选择构表实现，搬运后端由 MemFabric 决定。
+已验证的 MF LOCAL 实现使用无共享可变状态的 AIV kernel，接受其映射池的原始 Host
+虚拟地址（HVA）。分块后超过 65,536 条记录的批次在启动前报错。
 发现非法、未对齐或越界的页起始值时，构表任务会发布空批次并报告错误。
 
 构表地址校验不需要初始化 MF entity：
 
     python -m pytest tests/python/operators/mem_cache/test_kv_sparse_metadata_aicpu.py -v
 
-验证整条搬运链路还需要兼容的 MemFabric AICPU kernel 和匹配的 Host 池。
+验证整条搬运链路还需要兼容的 MemFabric LOCAL copy 实现和匹配的 Host 池。
 
 ## torch_native
 
@@ -121,7 +123,7 @@ Python 在同一提交流上，通过 `host_memory.set_memfabric_pool` 发布的
 
 AIV 在调用者的当前 NPU 流上提交搬运。C++ adapter 对 Device 组件和传给它的两个索引张量调用 `record_stream`，由 NPU 缓存分配器保护其存储直至搬运完成。连续索引副本在提交流上创建并使用。调用者负责建立跨流依赖，保留 Host 缓冲区及其注册直至搬运完成，并等待搬运结束后再改写或复用相关存储。释放 MemFabric 池前，须同步所有尚未完成的搬运。
 
-AICPU 在调用者的当前 NPU 流上提交构表和 MemFabric copy。C++ adapter 在该流上记录 Device 组件和原始索引，地址表也在同一流上分配和消费。封装层为同一设备上的跨流 MemFabric copy 建立顺序。调用者负责持有 Host 缓冲区，并建立生产、搬运和消费之间的依赖。
+AICPU 在调用者的当前 NPU 流上提交构表和 MemFabric copy。C++ adapter 在该流上记录 Device 组件和原始索引，地址表也在同一流上分配和消费。对于无共享可变状态的 LOCAL copy，封装层不再添加完成事件。调用者负责持有 Host 缓冲区，并建立生产、搬运和消费之间的依赖。若换用具有共享可变拷贝状态的 MF 后端，该后端须先提供自己的跨流排序保证，才能使用此路径。
 
 ## NPU Graph 捕获
 
