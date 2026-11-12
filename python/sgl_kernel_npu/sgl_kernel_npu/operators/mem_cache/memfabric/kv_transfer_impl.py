@@ -13,6 +13,7 @@ import torch
 from .host_memory import _load_offload, get_memfabric_pool
 
 _submit_lock = Lock()
+_last_sparse_submission = {}
 
 
 def _check_component(device, host, page_size, index_device):
@@ -145,9 +146,18 @@ def _submit_aicpu(components, device_indices, host_indices, page_size, direction
         page_size,
         direction,
     )
-    # MF LOCAL enqueues its stateless copy on the same stream as the builder.
-    # HiCache owns the dependencies for KV data; no extra completion event is needed here.
-    ret = sparse_copy(src, dst, lengths, count, device)
+    # The tables were allocated on this stream. Only the shared MF copy context
+    # needs a dependency when switching between submission streams.
+    stream = torch.npu.current_stream()
+    previous = _last_sparse_submission.get(device)
+    if previous is not None and stream != previous[0]:
+        stream.wait_event(previous[1])
+    try:
+        ret = sparse_copy(src, dst, lengths, count, device)
+    finally:
+        done = torch.npu.Event()
+        done.record(stream)
+        _last_sparse_submission[device] = (stream, done)
     if ret != 0:
         raise RuntimeError(f"MF sparse_copy failed: code={ret}")
 

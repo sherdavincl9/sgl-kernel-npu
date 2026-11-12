@@ -99,19 +99,16 @@ The default `--ops all` also discovers both operators. Follow the upstream
 
 One AICPU task reads the live NPU page-start indices and generates
 `src` and `dst` (int64 address bits) and `lengths` and `count` (int32).
-The four outputs are allocated separately. Records are ordered by component,
-page, layer, and 32 KiB chunk; an extra split may be appended to keep paired copies even.
-The compact component
+Records are ordered by component, page, and layer. The compact component
 description is an ACLNN integer array attribute, so it needs no staging tensor or
 separate H2D copy. CANN serializes and delivers the task parameters.
 
 On the same stream, Python submits `sparse_copy` through the initialized pool
 published with `host_memory.set_memfabric_pool`. If no pool was published, it
 uses the legacy module-level `offload.sparse_copy` and the caller must initialize
-that entry. `impl="aicpu"` selects the metadata builder; MemFabric selects its
-copy engine. The validated MF LOCAL implementation uses a stateless AIV kernel
-and accepts the original Host virtual addresses (HVAs) from its mapped pool.
-Batches above 65,536 records after splitting are rejected before launch. If a page start is
+that entry. The selected MemFabric copy must support AICPU sparse copy with
+original Host virtual addresses (HVAs), using buffers from the same pool.
+Batches above 65,536 records are rejected before launch. If a page start is
 invalid, unaligned, or out of range, the builder publishes an empty batch and
 reports an error.
 
@@ -119,7 +116,7 @@ The AICPU builder's address checks can be run without an MF entity:
 
     python -m pytest tests/python/operators/mem_cache/test_kv_sparse_metadata_aicpu.py -v
 
-End-to-end checks also require a compatible MemFabric LOCAL copy implementation and a
+End-to-end checks also require a compatible MemFabric AICPU kernel and a
 matching Host pool.
 
 ## torch_native
@@ -130,7 +127,7 @@ An independent synchronous reference directly copies original Tensor layer/page 
 
 AIV enqueues on the caller's current NPU stream. The C++ adapter uses `record_stream` on the Device components and both index tensors passed to it, so the NPU caching allocator keeps their storage alive until the transfer completes. Contiguous index copies are created and used on the submission stream. The caller provides cross-stream dependencies, keeps Host buffers and their registrations alive through completion, and waits before modifying or reusing transfer storage. Synchronize outstanding transfers before releasing the MemFabric pool.
 
-AICPU enqueues metadata generation and MemFabric copy on the caller's current NPU stream. Its C++ adapter records the Device components and original indices on that stream. The address tables are allocated and consumed on the same stream. The wrapper adds no completion events for the stateless LOCAL copy. The caller owns the Host buffers and provides dependencies between producers, transfers, and consumers. A different MF engine with shared mutable copy state must provide its own cross-stream ordering before it can use this path.
+AICPU enqueues metadata generation and MemFabric copy on the caller's current NPU stream. Its C++ adapter records the Device components and original indices on that stream. The address tables are allocated and consumed on the same stream. The wrapper orders MemFabric submissions across streams on the same device. The caller owns the Host buffers and provides dependencies between producers, transfers, and consumers.
 
 ## NPU graph capture
 
