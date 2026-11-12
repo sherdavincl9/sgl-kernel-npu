@@ -4,8 +4,10 @@ The caller owns the registered Host storage. The ACLNN adapters record NPU
 inputs on the caller's stream. NPU graph capture is not supported.
 """
 
+import importlib.util
 import os
 from functools import lru_cache
+from pathlib import Path
 from threading import Lock
 
 import torch
@@ -13,7 +15,6 @@ import torch
 from .host_memory import _load_offload, get_memfabric_pool
 
 _submit_lock = Lock()
-_last_sparse_submission = {}
 
 
 def _check_component(device, host, page_size, index_device):
@@ -120,46 +121,43 @@ def _resolve_host_dva(host):
 
 
 @lru_cache(maxsize=1)
-def _get_aicpu_builder():
+def _get_aicpu_submit():
     if os.environ.get("SGLANG_HICACHE_HOST_MEM_BACKEND", "").lower() == "acl":
         raise ValueError(
             "impl='aicpu' requires MF host-pool memory, not ACL host registration"
         )
-    build = getattr(torch.ops.npu, "kv_sparse_metadata_aicpu", None)
-    if build is None:
-        raise RuntimeError("Rebuild sgl-kernel-npu with --ops kv_sparse_metadata")
-    return build
+    # The operator's pybind entry lives in the already loaded Torch library.
+    library = Path(__file__).resolve().parents[3] / "lib" / "libsgl_kernel_npu.so"
+    spec = importlib.util.spec_from_file_location(
+        "sgl_kernel_npu._kv_sparse_metadata", library
+    )
+    if spec is None or spec.loader is None:
+        raise RuntimeError("Cannot load the AICPU submission entry")
+    try:
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+    except ImportError as error:
+        raise RuntimeError(
+            "Rebuild sgl-kernel-npu with --ops kv_sparse_metadata"
+        ) from error
+    return module.submit
 
 
 def _submit_aicpu(components, device_indices, host_indices, page_size, direction, device):
-    build = _get_aicpu_builder()
+    submit = _get_aicpu_submit()
     pool = get_memfabric_pool()
     if pool is None:
         pool = _load_offload()
-    sparse_copy = pool.sparse_copy
-
-    src, dst, lengths, count = build(
+    submit(
+        pool.sparse_copy,
         device_indices,
         host_indices,
         [dev for dev, _ in components],
         [host for _, host in components],
         page_size,
         direction,
+        device,
     )
-    # The tables were allocated on this stream. Only the shared MF copy context
-    # needs a dependency when switching between submission streams.
-    stream = torch.npu.current_stream()
-    previous = _last_sparse_submission.get(device)
-    if previous is not None and stream != previous[0]:
-        stream.wait_event(previous[1])
-    try:
-        ret = sparse_copy(src, dst, lengths, count, device)
-    finally:
-        done = torch.npu.Event()
-        done.record(stream)
-        _last_sparse_submission[device] = (stream, done)
-    if ret != 0:
-        raise RuntimeError(f"MF sparse_copy failed: code={ret}")
 
 
 def _submit_aiv(components, di, hi, page_size, direction, host_layout):

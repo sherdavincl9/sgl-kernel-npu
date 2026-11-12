@@ -1,13 +1,20 @@
 #include "metadata_args.h"
 #include "aclnn_runtime.h"
 #include "aclnn_build_kv_sparse_metadata.h"
+#include <ATen/record_function.h>
 #include <c10/core/DeviceGuard.h>
+#include <pybind11/stl.h>
+#include <torch/csrc/utils/pybind.h>
 #include <torch/library.h>
 #include <torch_npu/csrc/core/npu/NPUFormat.h>
+#include <torch_npu/csrc/core/npu/NPUEvent.h>
 #include <array>
 #include <cstring>
 #include <limits>
+#include <memory>
+#include <mutex>
 #include <tuple>
+#include <unordered_map>
 #include <vector>
 
 namespace sglang::kv_metadata {
@@ -158,6 +165,80 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> BuildMetadata(
     at_npu::native::OpCommand::RunOpApi("aclnnBuildKvSparseMetadata", launch);
     return {src, dst, lengths, count};
 }
+
+namespace {
+struct SparseSubmission {
+    explicit SparseSubmission(c10_npu::NPUStream stream) : stream(stream) {}
+    c10_npu::NPUStream stream;
+    c10_npu::NPUEvent done;
+};
+
+struct SparseSubmitState {
+    std::mutex mutex;
+    std::unordered_map<c10::DeviceIndex, std::unique_ptr<SparseSubmission>> previous;
+
+    void Wait(const c10_npu::NPUStream &stream)
+    {
+        auto it = previous.find(stream.device_index());
+        if (it != previous.end() && it->second->stream != stream) {
+            it->second->done.block(stream);
+        }
+    }
+
+    void Record(const c10_npu::NPUStream &stream)
+    {
+        auto submission = std::make_unique<SparseSubmission>(stream);
+        submission->done.record(stream);
+        previous[stream.device_index()] = std::move(submission);
+    }
+};
+
+void Submit(SparseSubmitState &state, const pybind11::function &sparse_copy,
+            const at::Tensor &device_indices, const at::Tensor &host_indices,
+            const std::vector<at::Tensor> &devices, const std::vector<at::Tensor> &hosts,
+            int64_t page_size, int64_t direction, const pybind11::object &mf_device)
+{
+    // Do not hold the GIL while waiting for a submitter whose MF callback needs it.
+    std::unique_lock<std::mutex> lock(state.mutex, std::defer_lock);
+    {
+        pybind11::gil_scoped_release release;
+        lock.lock();
+    }
+    const auto device = device_indices.device();
+    TORCH_CHECK(device.type() == c10::DeviceType::PrivateUse1, "KV indices must be on NPU");
+    c10::OptionalDeviceGuard guard(device);
+    const auto stream = c10_npu::getCurrentNPUStream();
+    std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> metadata;
+    {
+        pybind11::gil_scoped_release release;
+        {
+            // Retain the builder-only profiling range when bypassing Python's
+            // Torch dispatcher. MF copy and event submission stay outside it.
+            RECORD_FUNCTION("npu::kv_sparse_metadata_aicpu", c10::ArrayRef<c10::IValue>{});
+            metadata = BuildMetadata(device_indices, host_indices, devices, hosts, page_size, direction);
+        }
+        state.Wait(stream);
+    }
+
+    int status;
+    try {
+        // MF exposes this pool through Python, while its public C API uses a
+        // different singleton. Invoke the existing pool on the caller thread,
+        // never from a RunOpApi worker. The tables remain on the NPU.
+        status = sparse_copy(std::get<0>(metadata), std::get<1>(metadata),
+                             std::get<2>(metadata), std::get<3>(metadata), mf_device).cast<int>();
+    } catch (...) {
+        pybind11::gil_scoped_release release;
+        state.Record(stream);
+        throw;
+    }
+    {
+        pybind11::gil_scoped_release release;
+        state.Record(stream);
+    }
+    TORCH_CHECK(status == 0, "MF sparse_copy failed: code=", status);
+}
+}  // namespace
 }
 
 TORCH_LIBRARY_FRAGMENT(npu, m)
@@ -169,4 +250,18 @@ TORCH_LIBRARY_FRAGMENT(npu, m)
 TORCH_LIBRARY_IMPL(npu, PrivateUse1, m)
 {
     m.impl("kv_sparse_metadata_aicpu", TORCH_FN(sglang::kv_metadata::BuildMetadata));
+}
+
+// Export a private Python entry from the same Torch library. This needs no
+// separate extension or change to the shared operator build framework.
+PYBIND11_MODULE(_kv_sparse_metadata, m)
+{
+    auto state = std::make_shared<sglang::kv_metadata::SparseSubmitState>();
+    m.def("submit", [state](const pybind11::function &sparse_copy,
+                           const at::Tensor &device_indices, const at::Tensor &host_indices,
+                           const std::vector<at::Tensor> &devices, const std::vector<at::Tensor> &hosts,
+                           int64_t page_size, int64_t direction, const pybind11::object &device) {
+        sglang::kv_metadata::Submit(*state, sparse_copy, device_indices, host_indices,
+                                   devices, hosts, page_size, direction, device);
+    });
 }

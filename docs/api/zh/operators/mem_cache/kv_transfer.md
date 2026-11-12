@@ -5,7 +5,7 @@
 | 实现 | arch22 | arch35 |
 | --- | --- | --- |
 | `ascendc_aiv` | 支持 | 支持 |
-| `aicpu` | 需要兼容的 MemFabric AICPU copy | 需要兼容的 MemFabric AICPU copy |
+| `aicpu` | 需要兼容的 MemFabric sparse copy | 需要兼容的 MemFabric sparse copy |
 | `torch_native` | 支持 | 支持 |
 
 AIV 实现面向 Ascend A3（arch22）和 A5（arch35）。运行时需匹配对应硬件，并提供已注册的 Host 内存。
@@ -101,17 +101,22 @@ A3 使用 `python3 setup.py --arch-version 2201 --ops kv_exchange` 构建，A5 �
 及 `lengths`、`count`（int32），记录按组件、页、层排列。组件描述通过 ACLNN 整数数组
 属性传递，无需暂存张量或单独的 H2D 拷贝。CANN 负责序列化并下发任务参数。
 
-Python 在同一提交流上，通过 `host_memory.set_memfabric_pool` 发布的已初始化池调用
-`sparse_copy`。没有发布池时，调用方须初始化旧版模块级入口，Python 调用
-`offload.sparse_copy`。MemFabric 必须支持使用原始 Host 虚拟地址（HVA）的 AICPU
-稀疏拷贝，Host 缓冲区须来自同一个池。超过 65,536 条记录的批次在启动前报错。
-发现非法、未对齐或越界的页起始值时，构表任务会发布空批次并报告错误。
+Python 将 `host_memory.set_memfabric_pool` 发布的已初始化池的 `sparse_copy`
+传给 Host C++ 提交入口。该入口在调用者的当前流上提交 AICPU 构表任务，回调同一池的
+`sparse_copy`，再记录 transfer 内部完成事件。没有发布池时，沿用已初始化的旧版模块级
+`offload.sparse_copy`。事件管理下沉到 C++，并未删除内部事件；调用方的完成事件保持不变。
+
+构表仍在设备 AICPU 上执行，不把 indices 或地址表回读到 Host CPU。MF 底层搬运由所安装的
+MemFabric 包决定，`impl="aicpu"` 表示本实现使用 AICPU 构表，不强制 MF 使用 AICPU 搬运。
+所选 MemFabric copy 须支持构表产生的原始 Host 虚拟地址（HVA），Host 缓冲区须来自同一个池。
+超过 65,536 条记录的批次在启动前报错。发现非法、未对齐或越界的页起始值时，构表任务会
+发布空批次并报告错误。
 
 构表地址校验不需要初始化 MF entity：
 
     python -m pytest tests/python/operators/mem_cache/test_kv_sparse_metadata_aicpu.py -v
 
-验证整条搬运链路还需要兼容的 MemFabric AICPU kernel 和匹配的 Host 池。
+验证整条搬运链路还需要兼容的 MemFabric sparse copy 和匹配的 Host 池。
 
 ## torch_native
 
@@ -121,7 +126,7 @@ Python 在同一提交流上，通过 `host_memory.set_memfabric_pool` 发布的
 
 AIV 在调用者的当前 NPU 流上提交搬运。C++ adapter 对 Device 组件和传给它的两个索引张量调用 `record_stream`，由 NPU 缓存分配器保护其存储直至搬运完成。连续索引副本在提交流上创建并使用。调用者负责建立跨流依赖，保留 Host 缓冲区及其注册直至搬运完成，并等待搬运结束后再改写或复用相关存储。释放 MemFabric 池前，须同步所有尚未完成的搬运。
 
-AICPU 在调用者的当前 NPU 流上提交构表和 MemFabric copy。C++ adapter 在该流上记录 Device 组件和原始索引，地址表也在同一流上分配和消费。封装层为同一设备上的跨流 MemFabric copy 建立顺序。调用者负责持有 Host 缓冲区，并建立生产、搬运和消费之间的依赖。
+AICPU 在调用者的当前 NPU 流上提交构表和 MemFabric copy。C++ adapter 在该流上记录 Device 组件和原始索引，地址表也在同一流上分配和消费。Host C++ 提交入口在 MF copy 提交后记录内部事件，并为同一设备上的跨流 MemFabric copy 建立顺序；Python 不再创建、记录或等待内部事件。调用者负责持有 Host 缓冲区，并建立生产、搬运和消费之间的依赖。
 
 ## NPU Graph 捕获
 

@@ -80,6 +80,69 @@ def test_addresses_and_updated_indices(layout, direction, component_count):
         assert count.cpu().item() == len(expected_lengths)
 
 
+@pytest.mark.parametrize("direction", [1, 2])
+def test_native_submit_callback_and_errors(direction, monkeypatch):
+    from sgl_kernel_npu.operators.mem_cache.memfabric import kv_transfer_impl
+
+    monkeypatch.delenv("SGLANG_HICACHE_HOST_MEM_BACKEND", raising=False)
+    kv_transfer_impl._get_aicpu_submit.cache_clear()
+    submit = kv_transfer_impl._get_aicpu_submit()
+    ps = 4
+    dev = torch.empty((2, 3, ps, 1, 8), dtype=torch.uint8, device="npu")
+    host = torch.empty((4, 2, ps, 1, 8), dtype=torch.uint8)
+    di, hi = indices([8, 0], ps), indices([4, 12], ps)
+    device_addresses = [
+        dev[layer, page].data_ptr() for page in (2, 0) for layer in range(2)
+    ]
+    host_addresses = [
+        host[page, layer].data_ptr() for page in (1, 3) for layer in range(2)
+    ]
+    expected_src, expected_dst = (
+        (host_addresses, device_addresses)
+        if direction == 1
+        else (device_addresses, host_addresses)
+    )
+
+    class FakePool:
+        calls = 0
+        result = 0
+        error = None
+
+        def sparse_copy(self, src, dst, lengths, count, device):
+            self.calls += 1
+            assert device == dev.device
+            assert all(t.device == device for t in (src, dst, lengths, count))
+            # Readback is test-only: the real MF callback consumes these NPU tables.
+            assert src.cpu().tolist() == expected_src
+            assert dst.cpu().tolist() == expected_dst
+            assert lengths.cpu().tolist() == [ps * 8] * 4
+            assert count.cpu().item() == 4
+            if self.error is not None:
+                raise self.error
+            return self.result
+
+    pool = FakePool()
+    args = (pool.sparse_copy, di, hi, [dev], [host], ps, direction, dev.device)
+    try:
+        submit(*args)
+        pool.result = 7
+        with pytest.raises(RuntimeError, match="MF sparse_copy failed.*7"):
+            submit(*args)
+        pool.result = 0
+        submit(*args)
+
+        pool.error = ValueError("MF callback sentinel")
+        with pytest.raises(ValueError, match="MF callback sentinel") as raised:
+            submit(*args)
+        assert raised.value is pool.error
+        pool.error = None
+        submit(*args)
+        assert pool.calls == 5
+    finally:
+        torch.npu.current_stream().synchronize()
+        kv_transfer_impl._get_aicpu_submit.cache_clear()
+
+
 def _check_invalid_page_aborts_batch():
     ps = 4
     dev = torch.empty((1, 2, ps, 1, 1), dtype=torch.uint8, device="npu")
