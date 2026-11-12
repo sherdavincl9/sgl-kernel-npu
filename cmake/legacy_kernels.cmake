@@ -408,8 +408,6 @@ target_link_directories(${OP_PLUGIN_NAME} PRIVATE
         ${TORCH_NPU_DIR}/lib
 )
 
-include("${PROJECT_OP_SRC_BASE}/mem_cache/kv_sparse_metadata/legacy.cmake")
-
 # Enable OpenMP for the pure-host metadata scheduler (parallel per-row cache build).
 target_compile_options(${OP_PLUGIN_NAME} PRIVATE -fopenmp)
 target_link_libraries(${OP_PLUGIN_NAME} PRIVATE gomp)
