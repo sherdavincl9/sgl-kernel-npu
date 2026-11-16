@@ -12,7 +12,8 @@ from threading import Lock
 
 import torch
 
-from .host_memory import _load_offload, get_memfabric_pool
+from .host_memory import _load_offload, _lookup_mapping, get_memfabric_pool
+from .kv_transfer import D2H, H2D
 
 _submit_lock = Lock()
 
@@ -122,10 +123,6 @@ def _resolve_host_dva(host):
 
 @lru_cache(maxsize=1)
 def _get_aicpu_submit():
-    if os.environ.get("SGLANG_HICACHE_HOST_MEM_BACKEND", "").lower() == "acl":
-        raise ValueError(
-            "impl='aicpu' requires MF host-pool memory, not ACL host registration"
-        )
     # The operator's pybind entry lives in the already loaded Torch library.
     library = Path(__file__).resolve().parents[3] / "lib" / "libsgl_kernel_npu.so"
     spec = importlib.util.spec_from_file_location(
@@ -194,7 +191,7 @@ def transfer_kv(
     direction,
     kv_layers,
     index_layers,
-    backend="aiv",
+    backend="ascendc_aiv",
 ):
     """Submit one selected pool/range without synchronizing the caller's stream."""
     if page_size <= 0 or device_indices.ndim != 1 or host_indices.ndim != 1:
@@ -206,8 +203,10 @@ def transfer_kv(
         or device_indices.numel() % page_size
     ):
         raise ValueError("indices must describe equal numbers of complete pages")
-    if direction not in (1, 2) or backend not in ("aiv", "aicpu"):
-        raise ValueError("expected H2D (1) or D2H (2), and aiv or aicpu")
+    if direction not in (H2D, D2H) or backend not in ("auto", "ascendc_aiv", "memfabric_aicpu"):
+        raise ValueError(
+            f"expected H2D ({H2D}) or D2H ({D2H}) and backend auto, ascendc_aiv or memfabric_aicpu"
+        )
     components = select_components(
         device_k,
         host_k,
@@ -230,10 +229,25 @@ def transfer_kv(
         _check_component(dev, host, page_size, device)
     if not device_indices.numel():
         return
+    if backend == "auto":
+        backend = "ascendc_aiv"
+        if direction == H2D:
+            # The selected components share a host pool. Its K view identifies
+            # the registration provider even when it starts inside a block.
+            mapping, _ = _lookup_mapping(components[0][1].data_ptr())
+            if mapping is not None and mapping.kind == "memfabric":
+                backend = "memfabric_aicpu"
+    elif (
+        backend == "memfabric_aicpu"
+        and os.environ.get("SGLANG_HICACHE_HOST_MEM_BACKEND", "").lower() == "acl"
+    ):
+        raise ValueError(
+            "impl='memfabric_aicpu' requires MF host-pool memory, not ACL host registration"
+        )
     with _submit_lock, torch.npu.device(device):
         if torch.npu.is_current_stream_capturing():
             raise RuntimeError("KV transfer currently supports eager execution only")
-        if backend == "aiv":
+        if backend == "ascendc_aiv":
             di = device_indices.contiguous()
             hi = host_indices.contiguous()
             _submit_aiv(components, di, hi, page_size, direction, host_layout)

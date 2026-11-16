@@ -5,7 +5,7 @@
 | 实现 | arch22 | arch35 |
 | --- | --- | --- |
 | `ascendc_aiv` | 支持 | 支持 |
-| `aicpu` | 需要兼容的 MemFabric sparse copy | 需要兼容的 MemFabric sparse copy |
+| `memfabric_aicpu` | 需要兼容的 MemFabric sparse copy | 需要兼容的 MemFabric sparse copy |
 | `torch_native` | 支持 | 支持 |
 
 AIV 实现面向 Ascend A3（arch22）和 A5（arch35）。运行时需匹配对应硬件，并提供已注册的 Host 内存。
@@ -50,8 +50,7 @@ def transfer_kv_all_layer_kv_split(
 
 ```
 
-四个入口的 `auto` 均选择 `ascendc_aiv`，支持逐层 H2D 和全层 D2H。显式 `impl` 可选 `ascendc_aiv`、`aicpu`、`torch_native`。
-旧调用可继续使用 `aiv`，它是 `ascendc_aiv` 的兼容别名。
+使用 ACL 注册的 Host 内存时，`auto` 在两个方向均选择 `ascendc_aiv`。使用 MemFabric 注册的 Host 内存时，逐层 H2D 选择 `memfabric_aicpu`，由 AICPU 构建地址表并提交 MemFabric `sparse_copy`。全层 D2H 选择 `ascendc_aiv`，使用 MemFabric 注册时取得的设备虚拟地址（DVA）。显式 `impl` 可选 `ascendc_aiv`、`memfabric_aicpu`、`torch_native`。
 
 ## 行为
 
@@ -87,9 +86,9 @@ A3 使用 `python3 setup.py --arch-version 2201 --ops kv_exchange` 构建，A5 �
 
 使用 MemFabric 时，创建 `memfabric_hybrid.offload.Offload` 实例，以 `Scene.LOCAL` 且 `alloc_size == reserve_size` 初始化，通过 `host_memory.set_memfabric_pool` 发布实例，用 `pool.empty` 分配 Host 缓冲区，并在传入切片前为每个完整分配调用一次 `host_memory.register_host_memory`。使用 ACL 时，分配 CPU 张量，并为每个完整分配调用一次 `host_memory.register_acl_host_memory`。
 
-## aicpu
+## memfabric_aicpu
 
-包含 `kv_sparse_metadata` 的 wheel 中，四个接口均可显式选择 `impl="aicpu"`。
+包含 `kv_sparse_metadata` 的 wheel 中，四个接口均可显式选择 `impl="memfabric_aicpu"`。
 在 A3 上可以用以下命令同时构建 AIV 和 AICPU 算子。
 
     python3 setup.py --arch-version 2201 --ops kv_exchange,kv_sparse_metadata --artifact wheel
@@ -106,8 +105,7 @@ Python 将 `host_memory.set_memfabric_pool` 发布的已初始化池的 `sparse_
 `sparse_copy`，再记录 transfer 内部完成事件。没有发布池时，沿用已初始化的旧版模块级
 `offload.sparse_copy`。事件管理下沉到 C++，并未删除内部事件；调用方的完成事件保持不变。
 
-构表仍在设备 AICPU 上执行，不把 indices 或地址表回读到 Host CPU。MF 底层搬运由所安装的
-MemFabric 包决定，`impl="aicpu"` 表示本实现使用 AICPU 构表，不强制 MF 使用 AICPU 搬运。
+设备 AICPU 根据 NPU 上的 indices 构建地址表。已安装的 MemFabric 包决定 `sparse_copy` 的执行单元。
 所选 MemFabric copy 须支持构表产生的原始 Host 虚拟地址（HVA），Host 缓冲区须来自同一个池。
 超过 65,536 条记录的批次在启动前报错。发现非法、未对齐或越界的页起始值时，构表任务会
 发布空批次并报告错误。
@@ -185,4 +183,4 @@ LF Host 可改为 `[5,6,ps,1,8]`，即 `[host_layers,host_pages,ps,1,8]` 分配�
 python -m pytest tests/python/operators/mem_cache/test_kv_transfer.py --impl ascendc_aiv --impl-ref torch_native --enable-perf=false -v -s -rs
 ```
 
-测试为 `auto` 和 `ascendc_aiv` 均初始化 LOCAL Host-memory entry，并注册完整 Host 分配。对原地修改目标使用独立缓冲区，逐字节比较后通过 `make_executor` / `check_performance` 采集。共享性能工具报告 NPU task 耗时之和，不包含全部 CPU 提交开销；端到端开销须另行计时。需要可用 NPU、匹配的 CANN/Torch/MemFabric，以及包含仓内 `kv_exchange` 算子的构建。
+测试初始化 LOCAL MemFabric 池，并注册完整的 Host 分配。使用 `--impl auto` 时，测试的 H2D 走 `memfabric_aicpu`，D2H 走 `ascendc_aiv`。对原地修改目标使用独立缓冲区，逐字节比较后通过 `make_executor` / `check_performance` 采集。共享性能工具报告 NPU task 耗时之和，不包含全部 CPU 提交开销；端到端开销须另行计时。测试需要可用 NPU、匹配的 CANN、Torch 和 MemFabric，以及 `kv_exchange` 算子。使用 `--impl auto` 时还需要 `kv_sparse_metadata` 和兼容的 MemFabric `sparse_copy`。

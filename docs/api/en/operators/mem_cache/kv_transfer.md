@@ -5,7 +5,7 @@
 | Implementation | arch22 | arch35 |
 | --- | --- | --- |
 | `ascendc_aiv` | Supported | Supported |
-| `aicpu` | Requires compatible MemFabric sparse copy | Requires compatible MemFabric sparse copy |
+| `memfabric_aicpu` | Requires compatible MemFabric sparse copy | Requires compatible MemFabric sparse copy |
 | `torch_native` | Supported | Supported |
 
 The AIV implementation targets Ascend A3 (arch22) and A5 (arch35). Availability depends on a compatible runtime and registered Host memory.
@@ -50,8 +50,7 @@ def transfer_kv_all_layer_kv_split(
 
 ```
 
-`auto` selects `ascendc_aiv` for all four APIs, for both per-layer H2D and all-layer D2H. Explicit choices are `ascendc_aiv`, `aicpu` and `torch_native`.
-Existing callers can continue using `aiv` as an alias for `ascendc_aiv`.
+`auto` uses `ascendc_aiv` for both directions with ACL-registered Host memory. With MemFabric-registered Host memory, per-layer H2D uses `memfabric_aicpu` to build address tables on the AICPU and submit MemFabric `sparse_copy`. All-layer D2H uses `ascendc_aiv` with the device virtual addresses (DVAs) obtained during MemFabric registration. The explicit choices are `ascendc_aiv`, `memfabric_aicpu`, and `torch_native`.
 
 ## Description
 
@@ -87,9 +86,9 @@ Build the CANN operator with `python3 setup.py --arch-version 2201 --ops kv_exch
 
 For MemFabric, create a `memfabric_hybrid.offload.Offload` instance, initialize `Scene.LOCAL` with `alloc_size == reserve_size`, publish it with `host_memory.set_memfabric_pool`, allocate Host buffers with `pool.empty`, and call `host_memory.register_host_memory` once per full allocation before passing its views to the transfer APIs. For ACL, allocate CPU tensors and call `host_memory.register_acl_host_memory` once per full allocation.
 
-## aicpu
+## memfabric_aicpu
 
-The four APIs accept explicit `impl="aicpu"` in wheels containing
+The four APIs accept explicit `impl="memfabric_aicpu"` in wheels containing
 `kv_sparse_metadata`. This command builds the metadata operator and the AIV operator on A3.
 
     python3 setup.py --arch-version 2201 --ops kv_exchange,kv_sparse_metadata --artifact wheel
@@ -111,9 +110,8 @@ If no pool was published, it uses the initialized legacy module-level
 `offload.sparse_copy`. Internal event management moves to C++; the event is retained,
 and the caller's completion events are unchanged.
 
-Metadata generation still runs on the device AICPU, without reading indices or address
-tables back to the Host CPU. The installed MemFabric package selects its copy backend;
-`impl="aicpu"` selects our AICPU metadata builder, not MF's copy execution unit.
+The device AICPU builds the address tables from the NPU indices. The installed
+MemFabric package selects the execution unit for `sparse_copy`.
 The selected copy must support the generated original Host virtual addresses (HVAs),
 using buffers from the same pool. Batches above 65,536 records are rejected before
 launch. If a page start is invalid, unaligned, or out of range, the builder publishes
@@ -193,4 +191,4 @@ For LF Host, allocate `[5,6,ps,1,8]`, meaning `[host_layers,host_pages,ps,1,8]`,
 python -m pytest tests/python/operators/mem_cache/test_kv_transfer.py --impl ascendc_aiv --impl-ref torch_native --enable-perf=false -v -s -rs
 ```
 
-The fixture initializes the LOCAL host-memory entry and registers Host allocations for both `auto` and `ascendc_aiv`. Tests isolate in-place destinations, compare exact bytes, and then use `make_executor` / `check_performance`. Shared profiling reports summed NPU-task duration, excluding full CPU submission overhead; measure end-to-end overhead separately. An available NPU and matching CANN/Torch/MemFabric build containing the in-tree `kv_exchange` operator are required.
+The fixture initializes the LOCAL MemFabric pool and registers Host allocations. With `--impl auto`, it exercises `memfabric_aicpu` for H2D and `ascendc_aiv` for D2H. Tests isolate in-place destinations, compare exact bytes, and then use `make_executor` / `check_performance`. Shared profiling reports summed NPU-task duration, excluding full CPU submission overhead; measure end-to-end overhead separately. The tests require an available NPU and matching CANN, Torch, and MemFabric builds with `kv_exchange`. With `--impl auto`, they also require `kv_sparse_metadata` and compatible MemFabric `sparse_copy`.
